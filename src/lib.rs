@@ -38,14 +38,16 @@ struct SinkInnerData<T> {
 }
 
 impl<'env, T: 'env, E: 'env> ScopedSink<'env, T, E> {
-    pub fn new<F>(f: F) -> Self
-    where
-        for<'scope> F: 'env
-            + Send
-            + FnMut(
-                &'scope SinkInner<'scope, 'env, T>,
-            ) -> Pin<Box<dyn Future<Output = Result<(), E>> + Send + 'scope>>,
-    {
+    pub fn new_dyn(
+        f: Box<
+            dyn 'env
+                + Send
+                + for<'scope> FnMut(
+                    &'scope SinkInner<'scope, 'env, T>,
+                )
+                    -> Pin<Box<dyn Future<Output = Result<(), E>> + Send + 'scope>>,
+        >,
+    ) -> Self {
         Self {
             data: Box::pin(SinkInner {
                 inner: Mutex::new(SinkInnerData {
@@ -57,11 +59,22 @@ impl<'env, T: 'env, E: 'env> ScopedSink<'env, T, E> {
                 phantom: PhantomData,
             }),
 
-            f: Box::new(f),
+            f,
             inner: None,
 
             phantom: PhantomData,
         }
+    }
+
+    pub fn new<F>(f: F) -> Self
+    where
+        for<'scope> F: 'env
+            + Send
+            + FnMut(
+                &'scope SinkInner<'scope, 'env, T>,
+            ) -> Pin<Box<dyn Future<Output = Result<(), E>> + Send + 'scope>>,
+    {
+        Self::new_dyn(Box::new(f))
     }
 }
 
