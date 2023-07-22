@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::marker::{PhantomData, PhantomPinned};
+use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Waker};
@@ -15,24 +15,21 @@ pub(crate) mod sealed {
 
 pin_project! {
     #[must_use = "Sink will not do anything if not used"]
-    pub struct ScopedSink<'env, T, E, F, Ft> {
-        f: F,
-        #[pin]
-        inner: Option<Ft>,
+    pub struct ScopedSink<'env, T, E> {
+        f: Box<dyn 'env + Send + for<'scope> FnMut(&'scope SinkInner<'scope, 'env, T>) -> Pin<Box<dyn Future<Output = Result<(), E>> + Send + 'scope>>>,
+        inner: Option<Pin<Box<dyn Future<Output = Result<(), E>> + Send + 'env>>>,
 
-        data: SinkInner<'env, T>,
+        data: Pin<Box<SinkInner<'env, 'env, T>>>,
 
-        #[pin]
-        pinned: PhantomPinned,
         phantom: PhantomData<E>,
     }
 }
 
-pub struct SinkInner<'env, T> {
+pub struct SinkInner<'scope, 'env, T> {
     inner: Mutex<SinkInnerData<T>>,
     closed: AtomicBool,
 
-    phantom: PhantomData<&'env T>,
+    phantom: PhantomData<&'scope mut &'env T>,
 }
 
 struct SinkInnerData<T> {
@@ -40,15 +37,17 @@ struct SinkInnerData<T> {
     waker: Option<Waker>,
 }
 
-impl<'env, T: 'env, E: 'env, F, Ft> ScopedSink<'env, T, E, F, Ft>
-where
-    F: FnMut(&'env SinkInner<'env, T>) -> Ft,
-    Ft: Future<Output = Result<(), E>> + 'env,
-    Self: 'env,
-{
-    pub fn new(f: F) -> Self {
+impl<'env, T: 'env, E: 'env> ScopedSink<'env, T, E> {
+    pub fn new<F>(f: F) -> Self
+    where
+        for<'scope> F: 'env
+            + Send
+            + FnMut(
+                &'scope SinkInner<'scope, 'env, T>,
+            ) -> Pin<Box<dyn Future<Output = Result<(), E>> + Send + 'scope>>,
+    {
         Self {
-            data: SinkInner {
+            data: Box::pin(SinkInner {
                 inner: Mutex::new(SinkInnerData {
                     data: None,
                     waker: None,
@@ -56,46 +55,17 @@ where
                 closed: AtomicBool::new(false),
 
                 phantom: PhantomData,
-            },
+            }),
 
-            f,
+            f: Box::new(f),
             inner: None,
 
-            pinned: PhantomPinned,
             phantom: PhantomData,
         }
     }
 }
 
-pub type DynScopedSink<'env, T, E> = ScopedSink<
-    'env,
-    T,
-    E,
-    Box<
-        dyn 'env + FnMut(&'env SinkInner<T>) -> Pin<Box<dyn Future<Output = Result<(), E>> + 'env>>,
-    >,
-    Pin<Box<dyn Future<Output = Result<(), E>> + 'env>>,
->;
-
-impl<'env, T: 'env, E: 'env> DynScopedSink<'env, T, E>
-where
-    Self: 'env,
-{
-    pub fn new_dyn<F, Ft>(mut f: F) -> Self
-    where
-        F: 'env + FnMut(&'env SinkInner<T>) -> Ft,
-        Ft: Future<Output = Result<(), E>> + 'env,
-    {
-        Self::new(Box::new(move |v| Box::pin(f(v))))
-    }
-}
-
-impl<'env, T: 'env, E: 'env, F, Ft> Sink<T> for ScopedSink<'env, T, E, F, Ft>
-where
-    F: FnMut(&'env SinkInner<'env, T>) -> Ft,
-    Ft: Future<Output = Result<(), E>> + 'env,
-    Self: 'env,
-{
+impl<'env, T: 'env, E: 'env> Sink<T> for ScopedSink<'env, T, E> {
     type Error = E;
 
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), E>> {
@@ -103,10 +73,10 @@ where
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), E>> {
-        let mut this = self.project();
+        let this = self.project();
         let fut = loop {
-            if let Some(v) = this.inner.as_mut().as_pin_mut() {
-                break v;
+            if let Some(v) = this.inner {
+                break v.as_mut();
             }
             if this.data.closed.load(Ordering::SeqCst) {
                 return Poll::Ready(Ok(()));
@@ -114,10 +84,10 @@ where
 
             // SAFETY: We constrained data lifetime to be 'scope.
             // Since 'scope is contained within self, it is safe to extend it.
-            let data = unsafe { &*(this.data as *const SinkInner<T>) };
+            let data = unsafe { &*(this.data.as_mut().get_unchecked_mut() as *const SinkInner<T>) };
 
             let f = &mut *this.f;
-            this.inner.set(Some(f(data)));
+            *this.inner = Some(f(data));
         };
 
         match fut.poll(cx) {
@@ -131,7 +101,7 @@ where
                 }
             }
             v => {
-                this.inner.set(None);
+                *this.inner = None;
                 v
             }
         }
@@ -164,16 +134,17 @@ where
         }
 
         let mut this = self.project();
-        let Some(fut) = this.inner.as_mut().as_pin_mut() else { return Poll::Ready(Ok(()))};
+        let Some(fut) = &mut this.inner else { return Poll::Ready(Ok(()))};
+        let fut = fut.as_mut();
         let ret = fut.poll(cx);
         if ret.is_ready() {
-            this.inner.set(None);
+            *this.inner = None;
         }
         ret
     }
 }
 
-impl<'scope, 'env: 'scope, T> Stream for &'scope SinkInner<'env, T> {
+impl<'scope, 'env: 'scope, T> Stream for &'scope SinkInner<'scope, 'env, T> {
     type Item = T;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -194,7 +165,6 @@ impl<'scope, 'env: 'scope, T> Stream for &'scope SinkInner<'env, T> {
 mod test {
     use super::*;
 
-    use std::pin::pin;
     use std::time::Duration;
 
     use anyhow::{bail, Error as AnyError, Result as AnyResult};
@@ -204,18 +174,38 @@ mod test {
 
     async fn test_helper<F>(f: F) -> AnyResult<()>
     where
-        F: Future<Output = AnyResult<()>>,
+        F: Future<Output = AnyResult<()>> + Send,
     {
         match timeout(Duration::from_secs(5), f).await {
             Ok(v) => v,
             Err(_) => bail!("Time ran out"),
         }
     }
+    /*
+    #[tokio::test]
+    async fn test_simple_fail() -> AnyResult<()> {
+        let mut sink: Pin<&mut ScopedSink<'static, usize, AnyError>> =
+            pin!(ScopedSink::new(|mut src| Box::pin(async move {
+                tokio::spawn(async move {
+                    println!("{:?}", src.next().await);
+                    println!("{:?}", src.next().await);
+                })
+                .await?;
+                Ok(())
+            })));
 
+        test_helper(async move {
+            sink.send(1).await?;
+            drop(sink);
+
+            Ok(())
+        })
+        .await
+    }
+    */
     #[tokio::test]
     async fn test_simple() -> AnyResult<()> {
-        let mut sink: Pin<&mut ScopedSink<usize, AnyError, _, _>> =
-            pin!(ScopedSink::new(|_| async { Ok(()) }));
+        let mut sink: ScopedSink<usize, AnyError> = ScopedSink::new(|_| Box::pin(async { Ok(()) }));
 
         test_helper(async move {
             println!("Closing");
@@ -228,8 +218,8 @@ mod test {
 
     #[tokio::test]
     async fn test_send_one() -> AnyResult<()> {
-        let mut sink: Pin<&mut ScopedSink<usize, AnyError, _, _>> =
-            pin!(ScopedSink::new(|mut src| async move {
+        let mut sink: ScopedSink<usize, AnyError> = ScopedSink::new(|mut src| {
+            Box::pin(async move {
                 println!("Starting sink");
                 while let Some(v) = src.next().await {
                     println!("Value: {v}");
@@ -237,7 +227,8 @@ mod test {
                 println!("Stopping sink");
 
                 Ok(())
-            }));
+            })
+        });
 
         test_helper(async move {
             sink.feed(1).await?;
@@ -252,8 +243,8 @@ mod test {
 
     #[tokio::test]
     async fn test_send_many() -> AnyResult<()> {
-        let mut sink: Pin<&mut ScopedSink<usize, AnyError, _, _>> =
-            pin!(ScopedSink::new(|mut src| async move {
+        let mut sink: ScopedSink<usize, AnyError> = ScopedSink::new(|mut src| {
+            Box::pin(async move {
                 println!("Starting sink");
                 while let Some(v) = src.next().await {
                     println!("Value: {v}");
@@ -261,7 +252,8 @@ mod test {
                 println!("Stopping sink");
 
                 Ok(())
-            }));
+            })
+        });
 
         test_helper(async move {
             for i in 0..10 {
@@ -279,8 +271,8 @@ mod test {
 
     #[tokio::test]
     async fn test_send_yield() -> AnyResult<()> {
-        let mut sink: Pin<&mut ScopedSink<usize, AnyError, _, _>> =
-            pin!(ScopedSink::new(|mut src| async move {
+        let mut sink: ScopedSink<usize, AnyError> = ScopedSink::new(|mut src| {
+            Box::pin(async move {
                 println!("Starting sink");
                 while let Some(v) = src.next().await {
                     println!("Value: {v}");
@@ -291,7 +283,8 @@ mod test {
                 println!("Stopping sink");
 
                 Ok(())
-            }));
+            })
+        });
 
         test_helper(async move {
             for i in 0..10 {
@@ -309,8 +302,8 @@ mod test {
 
     #[tokio::test]
     async fn test_send_yield2() -> AnyResult<()> {
-        let mut sink: Pin<&mut ScopedSink<usize, AnyError, _, _>> =
-            pin!(ScopedSink::new(|mut src| async move {
+        let mut sink: ScopedSink<usize, AnyError> = ScopedSink::new(|mut src| {
+            Box::pin(async move {
                 println!("Starting sink");
                 while let Some(v) = src.next().await {
                     println!("Value: {v}");
@@ -321,7 +314,8 @@ mod test {
                 println!("Stopping sink");
 
                 Ok(())
-            }));
+            })
+        });
 
         test_helper(async move {
             for i in 0..10 {
@@ -343,8 +337,8 @@ mod test {
 
     #[tokio::test]
     async fn test_send_many_flush() -> AnyResult<()> {
-        let mut sink: Pin<&mut ScopedSink<usize, AnyError, _, _>> =
-            pin!(ScopedSink::new(|mut src| async move {
+        let mut sink: ScopedSink<usize, AnyError> = ScopedSink::new(|mut src| {
+            Box::pin(async move {
                 println!("Starting sink");
                 while let Some(v) = src.next().await {
                     println!("Value: {v}");
@@ -352,7 +346,8 @@ mod test {
                 println!("Stopping sink");
 
                 Ok(())
-            }));
+            })
+        });
 
         test_helper(async move {
             for i in 0..10 {
