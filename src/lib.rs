@@ -5,7 +5,7 @@ use std::task::{Context, Poll, Waker};
 
 use futures_core::Stream;
 use futures_sink::Sink;
-use parking_lot::{Mutex, MutexGuard};
+use parking_lot::Mutex;
 use pin_project_lite::pin_project;
 
 pub(crate) mod sealed {
@@ -148,31 +148,31 @@ impl<'env, T: 'env, E: 'env> Sink<T> for ScopedSink<'env, T, E> {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), E>> {
         let this = self.project();
-        // SAFETY: We get pointer here, should be safe to get
-        let data_ptr = unsafe { this.data.as_mut().get_unchecked_mut() as *mut SinkInner<T> };
-        let mut data = this.data.inner.lock();
+        let closed = this.data.inner.lock().closed;
 
         let fut = loop {
             if let Some(v) = this.inner {
                 break v.as_mut();
             }
-            if data.closed {
+            if closed {
                 return Poll::Ready(Ok(()));
             }
 
             // SAFETY: We constrained data lifetime to be 'scope.
             // Since 'scope is contained within self, it is safe to extend it.
-            let inner = unsafe { Pin::new_unchecked(&mut *data_ptr) };
+            let inner = unsafe {
+                Pin::new_unchecked(
+                    &mut *(this.data.as_mut().get_unchecked_mut() as *mut SinkInner<T>),
+                )
+            };
 
             let f = &mut *this.f;
-            // Unlock the mutex to prevent deadlock
-            *this.inner = Some(MutexGuard::unlocked(&mut data, || f(inner)));
+            *this.inner = Some(f(inner));
         };
 
-        // Unlock the mutex to prevent deadlock
-        match MutexGuard::unlocked(&mut data, || fut.poll(cx)) {
+        match fut.poll(cx) {
             Poll::Pending => {
-                if data.data.is_none() {
+                if this.data.inner.lock().data.is_none() {
                     Poll::Ready(Ok(()))
                 } else {
                     Poll::Pending
