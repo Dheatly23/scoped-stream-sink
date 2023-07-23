@@ -1,68 +1,67 @@
 use std::future::Future;
-use std::marker::PhantomData;
+use std::marker::{PhantomData, PhantomPinned};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Waker};
 
 use futures_core::Stream;
 use futures_sink::Sink;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, MutexGuard};
 use pin_project_lite::pin_project;
 
 pub(crate) mod sealed {
     pub(crate) trait Sealed {}
 }
 
+pub type DynFn<'env, T, E> = Box<
+    dyn 'env
+        + Send
+        + for<'scope> FnMut(
+            Pin<&'scope mut SinkInner<'scope, 'env, T>>,
+        ) -> Pin<Box<dyn Future<Output = Result<(), E>> + Send + 'scope>>,
+>;
+
 pin_project! {
     #[must_use = "Sink will not do anything if not used"]
     pub struct ScopedSink<'env, T, E> {
-        f: Box<dyn 'env + Send + for<'scope> FnMut(&'scope SinkInner<'scope, 'env, T>) -> Pin<Box<dyn Future<Output = Result<(), E>> + Send + 'scope>>>,
+        f: DynFn<'env, T, E>,
         inner: Option<Pin<Box<dyn Future<Output = Result<(), E>> + Send + 'env>>>,
 
         data: Pin<Box<SinkInner<'env, 'env, T>>>,
-
-        phantom: PhantomData<E>,
     }
-}
-
-pub struct SinkInner<'scope, 'env, T> {
-    inner: Mutex<SinkInnerData<T>>,
-    closed: AtomicBool,
-
-    phantom: PhantomData<&'scope mut &'env T>,
 }
 
 struct SinkInnerData<T> {
     data: Option<T>,
     waker: Option<Waker>,
+    closed: bool,
+}
+
+pin_project! {
+    pub struct SinkInner<'scope, 'env, T> {
+        inner: Mutex<SinkInnerData<T>>,
+
+        #[pin]
+        pinned: PhantomPinned,
+        phantom: PhantomData<&'scope mut &'env T>,
+    }
 }
 
 impl<'env, T: 'env, E: 'env> ScopedSink<'env, T, E> {
-    pub fn new_dyn(
-        f: Box<
-            dyn 'env
-                + Send
-                + for<'scope> FnMut(
-                    &'scope SinkInner<'scope, 'env, T>,
-                )
-                    -> Pin<Box<dyn Future<Output = Result<(), E>> + Send + 'scope>>,
-        >,
-    ) -> Self {
+    pub fn new_dyn(f: DynFn<'env, T, E>) -> Self {
         Self {
             data: Box::pin(SinkInner {
                 inner: Mutex::new(SinkInnerData {
                     data: None,
                     waker: None,
+                    closed: false,
                 }),
-                closed: AtomicBool::new(false),
 
+                pinned: PhantomPinned,
                 phantom: PhantomData,
             }),
 
             f,
             inner: None,
-
-            phantom: PhantomData,
         }
     }
 
@@ -71,7 +70,7 @@ impl<'env, T: 'env, E: 'env> ScopedSink<'env, T, E> {
         for<'scope> F: 'env
             + Send
             + FnMut(
-                &'scope SinkInner<'scope, 'env, T>,
+                Pin<&'scope mut SinkInner<'scope, 'env, T>>,
             ) -> Pin<Box<dyn Future<Output = Result<(), E>> + Send + 'scope>>,
     {
         Self::new_dyn(Box::new(f))
@@ -87,27 +86,31 @@ impl<'env, T: 'env, E: 'env> Sink<T> for ScopedSink<'env, T, E> {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), E>> {
         let this = self.project();
+        // SAFETY: We get pointer here, should be safe to get
+        let data_ptr = unsafe { this.data.as_mut().get_unchecked_mut() as *mut SinkInner<T> };
+        let mut data = this.data.inner.lock();
+
         let fut = loop {
             if let Some(v) = this.inner {
                 break v.as_mut();
             }
-            if this.data.closed.load(Ordering::SeqCst) {
+            if data.closed {
                 return Poll::Ready(Ok(()));
             }
 
             // SAFETY: We constrained data lifetime to be 'scope.
             // Since 'scope is contained within self, it is safe to extend it.
-            let data = unsafe { &*(this.data.as_mut().get_unchecked_mut() as *const SinkInner<T>) };
+            let inner = unsafe { Pin::new_unchecked(&mut *data_ptr) };
 
             let f = &mut *this.f;
-            *this.inner = Some(f(data));
+            // Unlock the mutex to prevent deadlock
+            *this.inner = Some(MutexGuard::unlocked(&mut data, || f(inner)));
         };
 
-        match fut.poll(cx) {
+        // Unlock the mutex to prevent deadlock
+        match MutexGuard::unlocked(&mut data, || fut.poll(cx)) {
             Poll::Pending => {
-                let guard = this.data.inner.lock();
-
-                if guard.data.is_none() {
+                if data.data.is_none() {
                     Poll::Ready(Ok(()))
                 } else {
                     Poll::Pending
@@ -121,17 +124,16 @@ impl<'env, T: 'env, E: 'env> Sink<T> for ScopedSink<'env, T, E> {
     }
 
     fn start_send(self: Pin<&mut Self>, item: T) -> Result<(), E> {
-        let data = self.project().data;
-        if data.closed.load(Ordering::SeqCst) {
+        let mut data = self.project().data.inner.lock();
+        if data.closed {
             panic!("Sink is closed!");
         }
 
-        let mut guard = data.inner.lock();
-        if guard.data.is_some() {
+        if data.data.is_some() {
             panic!("poll_ready() is not called yet!");
         }
-        guard.data = Some(item);
-        if let Some(waker) = guard.waker.take() {
+        data.data = Some(item);
+        if let Some(waker) = data.waker.take() {
             waker.wake();
         }
 
@@ -139,15 +141,20 @@ impl<'env, T: 'env, E: 'env> Sink<T> for ScopedSink<'env, T, E> {
     }
 
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), E>> {
-        let data = self.as_mut().project().data;
-        data.closed.store(true, Ordering::SeqCst);
+        let mut data = self.as_mut().project().data.inner.lock();
+        data.closed = true;
 
-        if data.inner.lock().data.is_some() {
+        if data.data.is_some() {
+            // Unlock the mutex
+            drop(data);
             return self.poll_flush(cx);
         }
 
+        // Unlock the mutex
+        drop(data);
+
         let mut this = self.project();
-        let Some(fut) = &mut this.inner else { return Poll::Ready(Ok(()))};
+        let Some(fut) = &mut this.inner else { return Poll::Ready(Ok(())) };
         let fut = fut.as_mut();
         let ret = fut.poll(cx);
         if ret.is_ready() {
@@ -157,17 +164,17 @@ impl<'env, T: 'env, E: 'env> Sink<T> for ScopedSink<'env, T, E> {
     }
 }
 
-impl<'scope, 'env: 'scope, T> Stream for &'scope SinkInner<'scope, 'env, T> {
+impl<'scope, 'env: 'scope, T> Stream for SinkInner<'scope, 'env, T> {
     type Item = T;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = unsafe { *self.get_unchecked_mut() };
-        let mut guard = this.inner.lock();
-        match guard.data.take() {
+        let temp = self.into_ref();
+        let mut this = temp.inner.lock();
+        match this.data.take() {
             Some(v) => Poll::Ready(Some(v)),
-            None if this.closed.load(Ordering::SeqCst) => Poll::Ready(None),
+            None if this.closed => Poll::Ready(None),
             None => {
-                guard.waker = Some(cx.waker().clone());
+                this.waker = Some(cx.waker().clone());
                 Poll::Pending
             }
         }
