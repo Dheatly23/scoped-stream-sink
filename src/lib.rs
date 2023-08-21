@@ -2,18 +2,62 @@ mod stream_sink;
 
 use std::future::Future;
 use std::marker::{PhantomData, PhantomPinned};
+use std::mem::transmute;
 use std::pin::Pin;
-use std::task::{Context, Poll, Waker};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll};
+use std::thread::{current, ThreadId};
 
 use futures_core::Stream;
 use futures_sink::Sink;
-use parking_lot::Mutex;
 use pin_project_lite::pin_project;
 
 pub use crate::stream_sink::*;
 
 pub(crate) mod sealed {
     pub(crate) trait Sealed {}
+}
+
+/// Protects value within local thread. Call [`Self::get_inner()`] to protect inner access
+/// to within thread. Call [`Self::set_inner_ctx()`] to set the context.
+pub(crate) struct LocalThread<T> {
+    thread: ThreadId,
+    lock: AtomicBool,
+
+    inner: T,
+}
+
+impl<T> LocalThread<T> {
+    pub(crate) fn new(inner: T) -> Self {
+        Self {
+            thread: current().id(),
+            lock: AtomicBool::new(false),
+            inner,
+        }
+    }
+
+    pub(crate) fn get_inner(&self) -> &mut T {
+        if !self.lock.swap(true, Ordering::SeqCst) {
+            if self.thread == current().id() {
+                self.lock.store(false, Ordering::SeqCst);
+                // SAFETY: It is current thread.
+                #[allow(mutable_transmutes)]
+                return unsafe { transmute::<&T, &mut T>(&self.inner) };
+            }
+        }
+
+        panic!("Called from other thread!");
+    }
+
+    pub(crate) fn set_inner_ctx(&mut self) -> &mut T {
+        if !self.lock.swap(true, Ordering::SeqCst) {
+            self.thread = current().id();
+            self.lock.store(false, Ordering::SeqCst);
+            return &mut self.inner;
+        }
+
+        panic!("Called from other thread!");
+    }
 }
 
 /// Erased type for the scope function. It accepts a [`SinkInner`] reference
@@ -55,7 +99,6 @@ pin_project! {
 
 struct SinkInnerData<T> {
     data: Option<T>,
-    waker: Option<Waker>,
     closed: bool,
 }
 
@@ -63,8 +106,16 @@ pin_project! {
     /// Inner type for [`ScopedSink`]. `'scope` defines the lifetime of it's scope,
     /// and `'env` defines the lifetime of it's environment. Lifetimes are constrained
     /// such that the reference cannot be sent outside it's scope.
+    ///
+    /// # Note About Thread-safety
+    ///
+    /// Even though [`SinkInner`] is both [`Send`] and [`Sink`], it's reference
+    /// **should** not be sent across thread. This is currently impossible, due to
+    /// lack of async version of [`scope`](https://doc.rust-lang.org/std/thread/fn.scope.html).
+    /// To future-proof that possibility, any usage of it will panic if called from different
+    /// thread than the outer thread. It also may panics outer thread too.
     pub struct SinkInner<'scope, 'env: 'scope, T> {
-        inner: Mutex<SinkInnerData<T>>,
+        inner: LocalThread<SinkInnerData<T>>,
 
         #[pin]
         pinned: PhantomPinned,
@@ -87,9 +138,8 @@ impl<'env, T: 'env, E: 'env> ScopedSink<'env, T, E> {
     pub fn new_dyn(f: DynSinkFn<'env, T, E>) -> Self {
         Self {
             data: Box::pin(SinkInner {
-                inner: Mutex::new(SinkInnerData {
+                inner: LocalThread::new(SinkInnerData {
                     data: None,
-                    waker: None,
                     closed: false,
                 }),
 
@@ -152,7 +202,13 @@ impl<'env, T: 'env, E: 'env> Sink<T> for ScopedSink<'env, T, E> {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), E>> {
         let this = self.project();
-        let closed = this.data.inner.lock().closed;
+        let data = this.data.as_mut().project().inner.set_inner_ctx();
+
+        if data.data.is_none() {
+            // No need to poll future.
+            return Poll::Ready(Ok(()));
+        }
+        let closed = data.closed;
 
         let fut = loop {
             if let Some(v) = this.inner {
@@ -165,32 +221,38 @@ impl<'env, T: 'env, E: 'env> Sink<T> for ScopedSink<'env, T, E> {
             // SAFETY: We constrained data lifetime to be 'scope.
             // Since 'scope is contained within self, it is safe to extend it.
             let inner = unsafe {
-                Pin::new_unchecked(
-                    &mut *(this.data.as_mut().get_unchecked_mut() as *mut SinkInner<T>),
-                )
+                transmute::<Pin<&mut SinkInner<T>>, Pin<&mut SinkInner<T>>>(this.data.as_mut())
             };
 
             let f = &mut *this.f;
             *this.inner = Some(f(inner));
         };
 
-        match fut.poll(cx) {
-            Poll::Pending => {
-                if this.data.inner.lock().data.is_none() {
-                    Poll::Ready(Ok(()))
-                } else {
-                    Poll::Pending
-                }
+        if let Poll::Ready(v) = fut.poll(cx) {
+            // Dispose future.
+            *this.inner = None;
+
+            if let Err(_) = v {
+                return Poll::Ready(v);
             }
-            v => {
-                *this.inner = None;
-                v
-            }
+        }
+
+        match this
+            .data
+            .as_mut()
+            .project()
+            .inner
+            .set_inner_ctx()
+            .data
+            .is_none()
+        {
+            true => Poll::Ready(Ok(())),
+            false => Poll::Pending,
         }
     }
 
     fn start_send(self: Pin<&mut Self>, item: T) -> Result<(), E> {
-        let mut data = self.project().data.inner.lock();
+        let data = self.project().data.as_mut().project().inner.set_inner_ctx();
         if data.closed {
             panic!("Sink is closed!");
         }
@@ -199,30 +261,36 @@ impl<'env, T: 'env, E: 'env> Sink<T> for ScopedSink<'env, T, E> {
             panic!("poll_ready() is not called yet!");
         }
         data.data = Some(item);
-        if let Some(waker) = data.waker.take() {
-            waker.wake();
-        }
 
         Ok(())
     }
 
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), E>> {
-        let mut data = self.as_mut().project().data.inner.lock();
+        let data = self
+            .as_mut()
+            .project()
+            .data
+            .as_mut()
+            .project()
+            .inner
+            .set_inner_ctx();
         data.closed = true;
 
+        // There is still some data
         if data.data.is_some() {
-            // Unlock the mutex
-            drop(data);
-            return self.poll_flush(cx);
+            if let v @ (Poll::Pending | Poll::Ready(Err(_))) = self.as_mut().poll_flush(cx) {
+                return v;
+            }
         }
 
-        // Unlock the mutex
-        drop(data);
+        // At this point, no data must reside.
+        // There is possibility future is polled twice, but that shouldn't matter.
 
         let mut this = self.project();
-        let Some(fut) = &mut this.inner else { return Poll::Ready(Ok(())) };
-        let fut = fut.as_mut();
-        let ret = fut.poll(cx);
+        let Some(fut) = &mut this.inner else {
+            return Poll::Ready(Ok(()));
+        };
+        let ret = fut.as_mut().poll(cx);
         if ret.is_ready() {
             *this.inner = None;
         }
@@ -233,16 +301,13 @@ impl<'env, T: 'env, E: 'env> Sink<T> for ScopedSink<'env, T, E> {
 impl<'scope, 'env: 'scope, T> Stream for SinkInner<'scope, 'env, T> {
     type Item = T;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let temp = self.into_ref();
-        let mut this = temp.inner.lock();
+        let this = temp.inner.get_inner();
         match this.data.take() {
             Some(v) => Poll::Ready(Some(v)),
             None if this.closed => Poll::Ready(None),
-            None => {
-                this.waker = Some(cx.waker().clone());
-                Poll::Pending
-            }
+            None => Poll::Pending,
         }
     }
 }
