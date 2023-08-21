@@ -25,14 +25,14 @@ pub(crate) mod sealed {
 /// // Helper methods for stream
 /// use futures_util::StreamExt;
 ///
-/// let func: scoped_sink::DynFn<usize, ()> = Box::new(|mut stream| Box::pin(async move {
+/// let func: scoped_sink::DynSinkFn<usize, ()> = Box::new(|mut stream| Box::pin(async move {
 ///     while let Some(v) = stream.next().await {
 ///         println!("Value: {v}");
 ///     }
 ///     Ok(())
 /// }));
 /// ```
-pub type DynFn<'env, T, E> = Box<
+pub type DynSinkFn<'env, T, E> = Box<
     dyn 'env
         + Send
         + for<'scope> FnMut(
@@ -46,7 +46,7 @@ pin_project! {
     /// similiar to [`scope`](https://doc.rust-lang.org/std/thread/fn.scope.html).
     #[must_use = "Sink will not do anything if not used"]
     pub struct ScopedSink<'env, T, E> {
-        f: DynFn<'env, T, E>,
+        f: DynSinkFn<'env, T, E>,
         inner: Option<Pin<Box<dyn Future<Output = Result<(), E>> + Send + 'env>>>,
 
         data: Pin<Box<SinkInner<'env, 'env, T>>>,
@@ -73,7 +73,7 @@ pin_project! {
 }
 
 impl<'env, T: 'env, E: 'env> ScopedSink<'env, T, E> {
-    /// Create new [`ScopedSink`] from a [`DynFn`].
+    /// Create new [`ScopedSink`] from a [`DynSinkFn`].
     /// You should probably use [`new`](`ScopedSink::new`) instead.
     ///
     /// # Examples
@@ -84,7 +84,7 @@ impl<'env, T: 'env, E: 'env> ScopedSink<'env, T, E> {
     ///     Box::pin(async { Ok(()) })
     /// }));
     /// ```
-    pub fn new_dyn(f: DynFn<'env, T, E>) -> Self {
+    pub fn new_dyn(f: DynSinkFn<'env, T, E>) -> Self {
         Self {
             data: Box::pin(SinkInner {
                 inner: Mutex::new(SinkInnerData {
