@@ -1,3 +1,5 @@
+mod stream_sink;
+
 use std::future::Future;
 use std::marker::{PhantomData, PhantomPinned};
 use std::pin::Pin;
@@ -7,6 +9,8 @@ use futures_core::Stream;
 use futures_sink::Sink;
 use parking_lot::Mutex;
 use pin_project_lite::pin_project;
+
+pub use crate::stream_sink::*;
 
 pub(crate) mod sealed {
     pub(crate) trait Sealed {}
