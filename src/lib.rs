@@ -87,7 +87,7 @@ pub type DynSinkFn<'env, T, E> = Box<
 pin_project! {
     /// Sink with a scoped future. It is useful to simply creates stateful sinks.
     /// Safety is guaranteed by the inner reference cannot be moved outside the future,
-    /// similiar to [`scope`](https://doc.rust-lang.org/std/thread/fn.scope.html).
+    /// similiar to [`std::thread::scope()`].
     #[must_use = "Sink will not do anything if not used"]
     pub struct ScopedSink<'env, T, E> {
         f: DynSinkFn<'env, T, E>,
@@ -111,7 +111,7 @@ pin_project! {
     ///
     /// Even though [`SinkInner`] is both [`Send`] and [`Sink`], it's reference
     /// **should** not be sent across thread. This is currently impossible, due to
-    /// lack of async version of [`scope`](https://doc.rust-lang.org/std/thread/fn.scope.html).
+    /// lack of async version of [`std::thread::scope()`].
     /// To future-proof that possibility, any usage of it will panic if called from different
     /// thread than the outer thread. It also may panics outer thread too.
     pub struct SinkInner<'scope, 'env: 'scope, T> {
@@ -125,7 +125,7 @@ pin_project! {
 
 impl<'env, T: 'env, E: 'env> ScopedSink<'env, T, E> {
     /// Create new [`ScopedSink`] from a [`DynSinkFn`].
-    /// You should probably use [`new`](`ScopedSink::new`) instead.
+    /// You should probably use [`Self::new()`] instead.
     ///
     /// # Examples
     ///
