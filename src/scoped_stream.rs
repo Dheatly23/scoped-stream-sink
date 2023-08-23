@@ -14,7 +14,7 @@ use crate::LocalThread;
 pin_project! {
     /// Stream with a scoped future. It is useful to easily create [`Stream`] type, without
     /// hassle of manually constructing one or using macros
-    /// (like [async_stream`](https://docs.rs/async-stream/latest/async_stream/)).
+    /// (like [`async_stream`](https://docs.rs/async-stream/latest/async_stream/)).
     /// Safety is guaranteed by carefully scoping [`StreamInner`],
     /// similiar to [`std::thread::scope()`].
     pub struct ScopedStream<'env, T> {
