@@ -19,7 +19,7 @@ use crate::LocalThread;
 /// // Helper methods for stream
 /// use futures_util::StreamExt;
 ///
-/// let func: scoped_sink::DynSinkFn<usize, ()> = Box::new(|mut stream| Box::pin(async move {
+/// let func: scoped_stream_sink::DynSinkFn<usize, ()> = Box::new(|mut stream| Box::pin(async move {
 ///     while let Some(v) = stream.next().await {
 ///         println!("Value: {v}");
 ///     }
@@ -80,7 +80,7 @@ impl<'env, T: 'env, E: 'env> ScopedSink<'env, T, E> {
     /// # Examples
     ///
     /// ```
-    /// # use scoped_sink::ScopedSink;
+    /// # use scoped_stream_sink::ScopedSink;
     /// let mut sink: ScopedSink<usize, ()> = ScopedSink::new_dyn(Box::new(|_| {
     ///     Box::pin(async { Ok(()) })
     /// }));
@@ -111,7 +111,7 @@ impl<'env, T: 'env, E: 'env> ScopedSink<'env, T, E> {
     ///
     /// ```
     /// # tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
-    /// # use scoped_sink::ScopedSink;
+    /// # use scoped_stream_sink::ScopedSink;
     /// use anyhow::Error;
     /// // Helper methods for stream
     /// use futures_util::{SinkExt, StreamExt};
