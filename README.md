@@ -1,6 +1,6 @@
-# scoped-sink
+# scoped-stream-sink
 
-Convenience library to construct sink.
+Convenience library to construct streams and sinks.
 
 ## How to Use
 
