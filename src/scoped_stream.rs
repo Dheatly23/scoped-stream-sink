@@ -12,6 +12,11 @@ use pin_project_lite::pin_project;
 use crate::LocalThread;
 
 pin_project! {
+    /// Stream with a scoped future. It is useful to easily create [`Stream`] type, without
+    /// hassle of manually constructing one or using macros
+    /// (like [async_stream`](https://docs.rs/async-stream/latest/async_stream/)).
+    /// Safety is guaranteed by carefully scoping [`StreamInner`],
+    /// similiar to [`std::thread::scope()`].
     pub struct ScopedStream<'env, T> {
         fut: Option<Pin<Box<dyn Future<Output = ()> + Send + 'env>>>,
 
@@ -20,6 +25,9 @@ pin_project! {
 }
 
 pin_project! {
+    /// Similiar to [`ScopedStream`], but allows for an error type. Future inside may be fallible,
+    /// unlike [`ScopedStream`]. Also, the inner [`TryStreamInner`] allows for either sending
+    /// an item or [`Result`] type.
     pub struct ScopedTryStream<'env, T, E> {
         fut: Option<Pin<Box<dyn Future<Output = Result<(), E>> + Send + 'env>>>,
 
@@ -38,6 +46,15 @@ struct TryStreamInnerData<T, E> {
 }
 
 pin_project! {
+    /// Inner type of [`ScopedStream`]. Implements [`Sink`] to send data for the stream.
+    ///
+    /// # Note About Thread-safety
+    ///
+    /// Even though [`StreamInner`] is both [`Send`] and [`Sink`], it's reference
+    /// **should** not be sent across thread. This is currently impossible, due to
+    /// lack of async version of [`std::thread::scope()`].
+    /// To future-proof that possibility, any usage of it will panic if called from different
+    /// thread than the outer thread. It also may panics outer thread too.
     pub struct StreamInner<'scope, 'env: 'scope, T> {
         inner: LocalThread<StreamInnerData<T>>,
 
@@ -48,6 +65,15 @@ pin_project! {
 }
 
 pin_project! {
+    /// Inner type of [`ScopedTryStream`]. Implements [`Sink`] for both item type or [`Result`].
+    ///
+    /// # Note About Thread-safety
+    ///
+    /// Even though [`TryStreamInner`] is both [`Send`] and [`Sink`], it's reference
+    /// **should** not be sent across thread. This is currently impossible, due to
+    /// lack of async version of [`std::thread::scope()`].
+    /// To future-proof that possibility, any usage of it will panic if called from different
+    /// thread than the outer thread. It also may panics outer thread too.
     pub struct TryStreamInner<'scope, 'env: 'scope, T, E> {
         inner: LocalThread<TryStreamInnerData<T, E>>,
 
@@ -58,6 +84,33 @@ pin_project! {
 }
 
 impl<'env, T> ScopedStream<'env, T> {
+    /// Create new [`ScopedStream`].
+    /// Future must return unit type. If you want fallible future, use [`ScopedTryStream`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+    /// # use scoped_stream_sink::ScopedStream;
+    /// // Helper methods for stream
+    /// use futures_util::{SinkExt, StreamExt};
+    ///
+    /// let mut stream = <ScopedStream<usize>>::new(|mut sink| Box::pin(async move {
+    ///     // Send a value.
+    ///     // It is okay to unwrap() because it is infallible.
+    ///     sink.send(1).await.unwrap();
+    ///
+    ///     // (Optional) close the sink. NOTE: sink cannot be used afterwards.
+    ///     // sink.close().await.unwrap();
+    /// }));
+    ///
+    /// // Receive all values
+    /// while let Some(i) = stream.next().await {
+    ///     println!("{i}");
+    /// }
+    ///
+    /// # });
+    /// ```
     pub fn new<F>(f: F) -> Self
     where
         for<'scope> F: FnOnce(
@@ -85,6 +138,34 @@ impl<'env, T> ScopedStream<'env, T> {
 }
 
 impl<'env, T, E: 'env> ScopedTryStream<'env, T, E> {
+    /// Create new [`ScopedTryStream`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+    /// # use scoped_stream_sink::ScopedTryStream;
+    /// use anyhow::Error;
+    /// // Helper methods for stream
+    /// use futures_util::{SinkExt, StreamExt};
+    ///
+    /// let mut stream = <ScopedTryStream<usize, Error>>::new(|mut sink| Box::pin(async move {
+    ///     // Send a value.
+    ///     sink.send(1).await?;
+    ///
+    ///     // (Optional) close the sink. NOTE: sink cannot be used afterwards.
+    ///     // sink.close().await.unwrap();
+    ///
+    ///     Ok(())
+    /// }));
+    ///
+    /// // Receive all values
+    /// while let Some(i) = stream.next().await.transpose()? {
+    ///     println!("{i}");
+    /// }
+    ///
+    /// # Ok::<(), Error>(()) });
+    /// ```
     pub fn new<F>(f: F) -> Self
     where
         for<'scope> F: FnOnce(
@@ -131,7 +212,7 @@ impl<'env, T> Stream for ScopedStream<'env, T> {
         let inner = this.data.as_mut().project().inner.set_inner_ctx();
         if let Some(v) = inner.data.take() {
             Poll::Ready(Some(v))
-        } else if inner.closed {
+        } else if this.fut.is_none() {
             Poll::Ready(None)
         } else {
             Poll::Pending
@@ -161,7 +242,7 @@ impl<'env, T, E> Stream for ScopedTryStream<'env, T, E> {
         let inner = this.data.as_mut().project().inner.set_inner_ctx();
         if let Some(v) = inner.data.take() {
             Poll::Ready(Some(v))
-        } else if inner.closed {
+        } else if this.fut.is_none() {
             Poll::Ready(None)
         } else {
             Poll::Pending
