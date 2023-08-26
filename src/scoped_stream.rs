@@ -79,7 +79,7 @@ pin_project! {
 
         #[pin]
         pinned: PhantomPinned,
-        phantom: PhantomData<&'scope mut &'env T>,
+        phantom: PhantomData<&'scope mut &'env (T, E)>,
     }
 }
 
@@ -137,7 +137,7 @@ impl<'env, T> ScopedStream<'env, T> {
     }
 }
 
-impl<'env, T, E: 'env> ScopedTryStream<'env, T, E> {
+impl<'env, T, E> ScopedTryStream<'env, T, E> {
     /// Create new [`ScopedTryStream`].
     ///
     /// # Examples
