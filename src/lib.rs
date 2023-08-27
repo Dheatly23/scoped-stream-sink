@@ -2,6 +2,7 @@ mod scoped_sink;
 mod scoped_stream;
 mod scoped_stream_sink;
 mod stream_sink;
+mod stream_sink_ext;
 
 use std::mem::transmute;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,6 +12,7 @@ pub use crate::scoped_sink::*;
 pub use crate::scoped_stream::*;
 pub use crate::scoped_stream_sink::*;
 pub use crate::stream_sink::*;
+pub use crate::stream_sink_ext::*;
 
 pub(crate) mod sealed {
     pub(crate) trait Sealed {}
