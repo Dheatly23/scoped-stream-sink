@@ -102,12 +102,13 @@ impl<'env, SI, RI, E> StreamSink<SI, RI> for ScopedStreamSink<'env, SI, RI, E> {
     fn poll_stream_sink(self: Pin<&mut Self>, cx: &mut Context<'_>) -> State<SI, Self::Error> {
         let this = self.project();
 
-        let Some(fut) = this.fut else {
-            return State::End;
+        let ret = if let Some(fut) = this.fut {
+            this.data.as_mut().project().inner.set_inner_ctx();
+            fut.as_mut().poll(cx)
+        } else {
+            Poll::Ready(Ok(()))
         };
 
-        this.data.as_mut().project().inner.set_inner_ctx();
-        let ret = fut.as_mut().poll(cx);
         if let Poll::Ready(v) = ret {
             *this.fut = None;
             if let Err(e) = v {
@@ -117,12 +118,13 @@ impl<'env, SI, RI, E> StreamSink<SI, RI> for ScopedStreamSink<'env, SI, RI, E> {
 
         let inner = this.data.as_mut().project().inner.set_inner_ctx();
         if this.fut.is_none() {
-            return State::End;
+            inner.closed = true;
         }
         match (inner.send.take(), !inner.closed && inner.recv.is_none()) {
             (Some(Err(e)), _) => State::Error(e),
             (Some(Ok(i)), true) => State::SendRecvReady(i),
             (Some(Ok(i)), false) => State::SendReady(i),
+            (None, _) if this.fut.is_none() => State::End,
             (None, true) => State::RecvReady,
             (None, false) => State::Pending,
         }
@@ -149,12 +151,12 @@ impl<'env, SI, RI, E> StreamSink<SI, RI> for ScopedStreamSink<'env, SI, RI, E> {
     ) -> Poll<Result<Option<SI>, Self::Error>> {
         let this = self.project();
 
-        let Some(fut) = this.fut else {
-            return Poll::Ready(Ok(None));
+        this.data.as_mut().project().inner.set_inner_ctx().closed = true;
+        let ret = match this.fut {
+            Some(fut) => fut.as_mut().poll(cx),
+            None => Poll::Ready(Ok(())),
         };
 
-        this.data.as_mut().project().inner.set_inner_ctx().closed = true;
-        let ret = fut.as_mut().poll(cx);
         if let Poll::Ready(v) = ret {
             *this.fut = None;
             if let Err(e) = v {
@@ -217,7 +219,8 @@ impl<'scope, 'env: 'scope, SI, RI, E> Sink<Result<SI, E>> for SinkPart<'scope, '
     fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         let inner = self.project().ptr.as_mut().project().inner.get_inner();
 
-        if inner.recv.is_none() && inner.send.is_none() && inner.closed {
+        inner.closed = true;
+        if inner.recv.is_none() && inner.send.is_none() {
             Poll::Ready(Ok(()))
         } else {
             Poll::Pending
