@@ -12,6 +12,7 @@ use pin_project_lite::pin_project;
 use crate::{LocalThread, State, StreamSink};
 
 pin_project! {
+    /// Scoped version of [`StreamSink`]. Makes building [`StreamSink`] much easier to do.
     pub struct ScopedStreamSink<'env, SI, RI, E> {
         fut: Option<Pin<Box<dyn Future<Output = Result<(), E>> + Send + 'env>>>,
 
@@ -36,18 +37,26 @@ pin_project! {
 }
 
 pin_project! {
+    /// [`Stream`] half of inner [`ScopedStreamSink`].
+    /// Produce receive type values.
+    /// Can only be closed from it's outer [`ScopedStreamSink`].
     pub struct StreamPart<'scope, 'env: 'scope, SI, RI, E> {
         ptr: Pin<&'scope mut StreamSinkInner<'scope, 'env, SI, RI, E>>,
     }
 }
 
 pin_project! {
+    /// [`Sink`] half of inner [`ScopedStreamSink`].
+    /// Can receive both send type or a [`Result`] type.
+    /// Closing will complete when outer [`ScopedStreamSink`] is closed and received all data.
     pub struct SinkPart<'scope, 'env: 'scope, SI, RI, E> {
         ptr: Pin<&'scope mut StreamSinkInner<'scope, 'env, SI, RI, E>>,
     }
 }
 
 impl<'env, SI, RI, E> ScopedStreamSink<'env, SI, RI, E> {
+    /// Creates new [`ScopedStreamSink`].
+    /// Safety is guaranteed by scoping both [`StreamPart`] and [`SinkPart`].
     pub fn new<F>(f: F) -> Self
     where
         for<'scope> F: FnOnce(
