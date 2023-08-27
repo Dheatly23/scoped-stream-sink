@@ -219,6 +219,313 @@ where
 }
 
 pin_project! {
+    pub struct MapSend<T, F, I> {
+        #[pin]
+        t: T,
+        f: F,
+        phantom: PhantomData<I>,
+    }
+}
+
+impl<T, F, SI, RI, I> StreamSink<SI, RI> for MapSend<T, F, I>
+where
+    T: StreamSink<I, RI>,
+    F: Fn(I) -> SI,
+{
+    type Error = T::Error;
+
+    fn poll_stream_sink(self: Pin<&mut Self>, cx: &mut Context<'_>) -> State<SI, Self::Error> {
+        let zelf = self.project();
+        let f = zelf.f;
+        match zelf.t.poll_stream_sink(cx) {
+            State::Error(e) => State::Error(e),
+            State::Pending => State::Pending,
+            State::End => State::End,
+            State::RecvReady => State::RecvReady,
+            State::SendReady(i) => State::SendReady(f(i)),
+            State::SendRecvReady(i) => State::SendRecvReady(f(i)),
+        }
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: RI) -> Result<(), Self::Error> {
+        self.project().t.start_send(item)
+    }
+
+    fn poll_close(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Option<SI>, Self::Error>> {
+        let zelf = self.project();
+        let f = zelf.f;
+        match zelf.t.poll_close(cx) {
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Ready(Ok(Some(i))) => Poll::Ready(Ok(Some(f(i)))),
+            Poll::Ready(Ok(None)) => Poll::Ready(Ok(None)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+pin_project! {
+    pub struct MapRecv<T, F, I> {
+        #[pin]
+        t: T,
+        f: F,
+        phantom: PhantomData<I>,
+    }
+}
+
+impl<T, F, SI, RI, I> StreamSink<SI, RI> for MapRecv<T, F, I>
+where
+    T: StreamSink<SI, I>,
+    F: Fn(RI) -> I,
+{
+    type Error = T::Error;
+
+    fn poll_stream_sink(self: Pin<&mut Self>, cx: &mut Context<'_>) -> State<SI, Self::Error> {
+        self.project().t.poll_stream_sink(cx)
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: RI) -> Result<(), Self::Error> {
+        let zelf = self.project();
+        let f = zelf.f;
+        zelf.t.start_send(f(item))
+    }
+
+    fn poll_close(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Option<SI>, Self::Error>> {
+        self.project().t.poll_close(cx)
+    }
+}
+
+pin_project! {
+    pub struct MapError<T, F> {
+        #[pin]
+        t: T,
+        f: F,
+    }
+}
+
+impl<T, F, SI, RI, E> StreamSink<SI, RI> for MapError<T, F>
+where
+    T: StreamSink<SI, RI>,
+    F: Fn(T::Error) -> E,
+{
+    type Error = E;
+
+    fn poll_stream_sink(self: Pin<&mut Self>, cx: &mut Context<'_>) -> State<SI, Self::Error> {
+        let zelf = self.project();
+        let f = zelf.f;
+        match zelf.t.poll_stream_sink(cx) {
+            State::Error(e) => State::Error(f(e)),
+            State::Pending => State::Pending,
+            State::End => State::End,
+            State::RecvReady => State::RecvReady,
+            State::SendReady(i) => State::SendReady(i),
+            State::SendRecvReady(i) => State::SendRecvReady(i),
+        }
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: RI) -> Result<(), Self::Error> {
+        let zelf = self.project();
+        let f = zelf.f;
+        match zelf.t.start_send(item) {
+            Ok(v) => Ok(v),
+            Err(e) => Err(f(e)),
+        }
+    }
+
+    fn poll_close(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Option<SI>, Self::Error>> {
+        let zelf = self.project();
+        let f = zelf.f;
+        match zelf.t.poll_close(cx) {
+            Poll::Ready(Err(e)) => Poll::Ready(Err(f(e))),
+            Poll::Ready(Ok(v)) => Poll::Ready(Ok(v)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+pin_project! {
+    pub struct ErrorCast<T, E> {
+        #[pin]
+        t: T,
+        phantom: PhantomData<E>,
+    }
+}
+
+impl<T, SI, RI, E> StreamSink<SI, RI> for ErrorCast<T, E>
+where
+    T: StreamSink<SI, RI>,
+    T::Error: Into<E>,
+{
+    type Error = E;
+
+    fn poll_stream_sink(self: Pin<&mut Self>, cx: &mut Context<'_>) -> State<SI, Self::Error> {
+        match self.project().t.poll_stream_sink(cx) {
+            State::Error(e) => State::Error(e.into()),
+            State::Pending => State::Pending,
+            State::End => State::End,
+            State::RecvReady => State::RecvReady,
+            State::SendReady(i) => State::SendReady(i),
+            State::SendRecvReady(i) => State::SendRecvReady(i),
+        }
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: RI) -> Result<(), Self::Error> {
+        match self.project().t.start_send(item) {
+            Ok(v) => Ok(v),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn poll_close(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Option<SI>, Self::Error>> {
+        match self.project().t.poll_close(cx) {
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e.into())),
+            Poll::Ready(Ok(v)) => Poll::Ready(Ok(v)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ChainState {
+    Pending,
+    Ready,
+    UEnd,
+    VEnd,
+    Done,
+}
+
+pin_project! {
+    pub struct Chain<U, V, II> {
+        #[pin]
+        u: U,
+        #[pin]
+        v: V,
+
+        state: ChainState,
+        phantom: PhantomData<II>,
+    }
+}
+
+impl<U, V, SI, II, RI> StreamSink<SI, RI> for Chain<U, V, II>
+where
+    U: StreamSink<II, RI>,
+    V: StreamSink<SI, II, Error = U::Error>,
+{
+    type Error = U::Error;
+
+    fn poll_stream_sink(self: Pin<&mut Self>, cx: &mut Context<'_>) -> State<SI, Self::Error> {
+        let mut zelf = self.project();
+
+        loop {
+            match *zelf.state {
+                ChainState::Pending => match zelf.v.as_mut().poll_stream_sink(&mut *cx) {
+                    State::Pending => return State::Pending,
+                    State::Error(e) => return State::Error(e),
+                    State::End => *zelf.state = ChainState::VEnd,
+                    State::SendReady(i) => return State::SendReady(i),
+                    State::RecvReady => *zelf.state = ChainState::Ready,
+                    State::SendRecvReady(i) => {
+                        *zelf.state = ChainState::Ready;
+                        return State::SendReady(i);
+                    }
+                },
+                ChainState::Ready => match zelf.u.as_mut().poll_stream_sink(&mut *cx) {
+                    State::Pending => return State::Pending,
+                    State::Error(e) => return State::Error(e),
+                    State::End => *zelf.state = ChainState::UEnd,
+                    State::SendReady(i) => match zelf.v.as_mut().start_send(i) {
+                        Err(e) => return State::Error(e),
+                        Ok(_) => *zelf.state = ChainState::Pending,
+                    },
+                    State::RecvReady => return State::RecvReady,
+                    State::SendRecvReady(i) => match zelf.v.as_mut().start_send(i) {
+                        Err(e) => return State::Error(e),
+                        Ok(_) => {
+                            *zelf.state = ChainState::Pending;
+                            return State::RecvReady;
+                        }
+                    },
+                },
+                ChainState::VEnd => match zelf.u.as_mut().poll_stream_sink(&mut *cx) {
+                    State::Pending => return State::Pending,
+                    State::Error(e) => return State::Error(e),
+                    State::End => *zelf.state = ChainState::Done,
+                    State::SendReady(_) => (),
+                    State::RecvReady | State::SendRecvReady(_) => return State::RecvReady,
+                },
+                ChainState::UEnd => match zelf.v.as_mut().poll_close(&mut *cx) {
+                    Poll::Pending => return State::Pending,
+                    Poll::Ready(Err(e)) => return State::Error(e),
+                    Poll::Ready(Ok(Some(_))) => (),
+                    Poll::Ready(Ok(None)) => *zelf.state = ChainState::Done,
+                },
+                ChainState::Done => return State::End,
+            }
+        }
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: RI) -> Result<(), Self::Error> {
+        self.project().u.start_send(item)
+    }
+
+    fn poll_close(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Option<SI>, Self::Error>> {
+        let mut zelf = self.project();
+
+        loop {
+            match *zelf.state {
+                ChainState::Pending => match zelf.v.as_mut().poll_stream_sink(&mut *cx) {
+                    State::Pending => return Poll::Pending,
+                    State::Error(e) => return Poll::Ready(Err(e)),
+                    State::End => *zelf.state = ChainState::VEnd,
+                    State::SendReady(i) => return Poll::Ready(Ok(Some(i))),
+                    State::RecvReady => *zelf.state = ChainState::Ready,
+                    State::SendRecvReady(i) => {
+                        *zelf.state = ChainState::Ready;
+                        return Poll::Ready(Ok(Some(i)));
+                    }
+                },
+                ChainState::Ready => match zelf.u.as_mut().poll_close(&mut *cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Ready(Ok(Some(i))) => match zelf.v.as_mut().start_send(i) {
+                        Err(e) => return Poll::Ready(Err(e)),
+                        Ok(_) => *zelf.state = ChainState::Pending,
+                    },
+                    Poll::Ready(Ok(None)) => *zelf.state = ChainState::UEnd,
+                },
+                ChainState::VEnd => match zelf.u.as_mut().poll_close(&mut *cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Ready(Ok(Some(_))) => (),
+                    Poll::Ready(Ok(None)) => *zelf.state = ChainState::Done,
+                },
+                ChainState::UEnd => match zelf.v.as_mut().poll_close(&mut *cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Ready(Ok(Some(_))) => (),
+                    Poll::Ready(Ok(None)) => *zelf.state = ChainState::Done,
+                },
+                ChainState::Done => return Poll::Ready(Ok(None)),
+            }
+        }
+    }
+}
+
+pin_project! {
     pub struct SendOne<'a, T: ?Sized, SI, RI, E> {
         value: Option<(Pin<&'a mut T>, RI)>,
         error: Option<E>,
@@ -613,6 +920,54 @@ where
 }
 
 pub trait StreamSinkExt<SendItem, RecvItem = SendItem>: StreamSink<SendItem, RecvItem> {
+    fn map_send<F, I>(self, f: F) -> MapSend<Self, F, SendItem>
+    where
+        Self: Sized,
+        F: Fn(SendItem) -> I,
+    {
+        MapSend {
+            t: self,
+            f,
+            phantom: PhantomData,
+        }
+    }
+
+    fn map_recv<F, I>(self, f: F) -> MapRecv<Self, F, RecvItem>
+    where
+        Self: Sized,
+        F: Fn(RecvItem) -> I,
+    {
+        MapRecv {
+            t: self,
+            f,
+            phantom: PhantomData,
+        }
+    }
+
+    fn error_cast<E>(self) -> ErrorCast<Self, E>
+    where
+        Self: Sized,
+        Self::Error: Into<E>,
+    {
+        ErrorCast {
+            t: self,
+            phantom: PhantomData,
+        }
+    }
+
+    fn chain<Other, Item>(self, other: Other) -> Chain<Self, Other, SendItem>
+    where
+        Self: Sized,
+        Other: StreamSink<Item, SendItem, Error = Self::Error>,
+    {
+        Chain {
+            u: self,
+            v: other,
+            state: ChainState::Pending,
+            phantom: PhantomData,
+        }
+    }
+
     fn send_one<'a>(
         self: Pin<&'a mut Self>,
         item: RecvItem,
