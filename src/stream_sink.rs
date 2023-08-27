@@ -162,6 +162,62 @@ pub trait StreamSink<SendItem, RecvItem = SendItem> {
     ) -> Poll<Result<Option<SendItem>, Self::Error>>;
 }
 
+impl<T, SendItem, RecvItem> StreamSink<SendItem, RecvItem> for &mut T
+where
+    T: StreamSink<SendItem, RecvItem> + ?Sized,
+{
+    type Error = T::Error;
+
+    fn poll_stream_sink(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> State<SendItem, Self::Error> {
+        // SAFETY: Repin the borrow immediately.
+        unsafe { Pin::new_unchecked(&mut **self.get_unchecked_mut()).poll_stream_sink(cx) }
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: RecvItem) -> Result<(), Self::Error> {
+        // SAFETY: Repin the borrow immediately.
+        unsafe { Pin::new_unchecked(&mut **self.get_unchecked_mut()).start_send(item) }
+    }
+
+    fn poll_close(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Option<SendItem>, Self::Error>> {
+        // SAFETY: Repin the borrow immediately.
+        unsafe { Pin::new_unchecked(&mut **self.get_unchecked_mut()).poll_close(cx) }
+    }
+}
+
+impl<T, SendItem, RecvItem> StreamSink<SendItem, RecvItem> for Pin<&mut T>
+where
+    T: StreamSink<SendItem, RecvItem> + ?Sized,
+{
+    type Error = T::Error;
+
+    fn poll_stream_sink(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> State<SendItem, Self::Error> {
+        // SAFETY: Inner is pinned.
+        unsafe { self.get_unchecked_mut().as_mut().poll_stream_sink(cx) }
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: RecvItem) -> Result<(), Self::Error> {
+        // SAFETY: Inner is pinned.
+        unsafe { self.get_unchecked_mut().as_mut().start_send(item) }
+    }
+
+    fn poll_close(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Option<SendItem>, Self::Error>> {
+        // SAFETY: Inner is pinned.
+        unsafe { self.get_unchecked_mut().as_mut().poll_close(cx) }
+    }
+}
+
 pin_project! {
     pub struct SendOne<'a, T: ?Sized, SI, RI, E> {
         value: Option<(Pin<&'a mut T>, RI)>,
