@@ -211,6 +211,14 @@ where
             }
         }
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            Self { error: Some(_), .. } => (1, Some(1)),
+            Self { value: None, .. } => (0, Some(0)),
+            _ => (0, None),
+        }
+    }
 }
 
 impl<'a, T, SI, RI, E> FusedStream for SendOne<'a, T, SI, RI, E>
@@ -281,6 +289,14 @@ where
                 *zelf.value = None;
                 Poll::Ready(None)
             }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            Self { error: Some(_), .. } => (1, Some(1)),
+            Self { value: None, .. } => (0, Some(0)),
+            _ => (0, None),
         }
     }
 }
@@ -357,6 +373,14 @@ where
             }
         }
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            Self { error: Some(_), .. } => (1, Some(1)),
+            Self { value: None, .. } => (0, Some(0)),
+            _ => (0, None),
+        }
+    }
 }
 
 impl<'a, T, SI, RI, IT, E> FusedStream for SendTryIter<'a, T, SI, RI, IT, E>
@@ -396,6 +420,22 @@ where
             *ptr = None;
         }
         Poll::Ready(r)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            Self { ptr: None, .. } => (0, Some(0)),
+            _ => (0, None),
+        }
+    }
+}
+
+impl<'a, T, SI, RI> FusedStream for Close<'a, T, SI, RI>
+where
+    T: StreamSink<SI, RI> + ?Sized,
+{
+    fn is_terminated(&self) -> bool {
+        self.ptr.is_none()
     }
 }
 
@@ -446,7 +486,7 @@ impl<SI, RI, T> StreamSinkExt<SI, RI> for T where T: StreamSink<SI, RI> {}
 pin_project! {
     pub struct StreamSinkPair<S, R> {
         #[pin]
-        stream: S,
+        stream: Option<S>,
 
         #[pin]
         sink: R,
@@ -456,55 +496,61 @@ pin_project! {
 impl<S, R> StreamSinkPair<S, R> {
     #[inline]
     pub fn new(stream: S, sink: R) -> Self {
-        Self { stream, sink }
+        Self {
+            stream: Some(stream),
+            sink,
+        }
     }
 
     #[inline]
-    pub fn get_pair(&mut self) -> (&mut S, &mut R) {
-        (&mut self.stream, &mut self.sink)
+    pub fn get_pair(&mut self) -> (Option<&mut S>, &mut R) {
+        (self.stream.as_mut(), &mut self.sink)
     }
 
     #[inline]
-    pub fn get_pinned_pair(self: Pin<&mut Self>) -> (Pin<&mut S>, Pin<&mut R>) {
+    pub fn get_pinned_pair(self: Pin<&mut Self>) -> (Option<Pin<&mut S>>, Pin<&mut R>) {
         let zelf = self.project();
-        (zelf.stream, zelf.sink)
+        (zelf.stream.as_pin_mut(), zelf.sink)
     }
 
     #[inline]
-    pub fn unwrap_pair(self) -> (S, R) {
+    pub fn unwrap_pair(self) -> (Option<S>, R) {
         (self.stream, self.sink)
     }
 }
 
 impl<S, R, Is, Ir, E> StreamSink<Is, Ir> for StreamSinkPair<S, R>
 where
-    S: Stream<Item = Result<Is, E>> + FusedStream,
+    S: Stream<Item = Result<Is, E>>,
     R: Sink<Ir, Error = E>,
 {
     type Error = E;
 
     fn poll_stream_sink(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> State<Is, Self::Error> {
-        let zelf = self.as_mut().project();
+        let mut zelf = self.as_mut().project();
 
-        if zelf.stream.is_terminated() {
+        let Some(stream) = zelf.stream.as_mut().as_pin_mut() else {
             return match zelf.sink.poll_close(cx) {
                 Poll::Pending => State::Pending,
                 Poll::Ready(Ok(_)) => State::End,
                 Poll::Ready(Err(e)) => State::Error(e),
             };
-        }
+        };
 
         let ready = match zelf.sink.poll_ready(&mut *cx) {
             Poll::Pending => false,
             Poll::Ready(Ok(_)) => true,
             Poll::Ready(Err(e)) => return State::Error(e),
         };
-        match (zelf.stream.poll_next(cx), ready) {
+        match (stream.poll_next(cx), ready) {
             (Poll::Pending, true) => State::RecvReady,
             (Poll::Pending, false) => State::Pending,
             (Poll::Ready(Some(Ok(t))), true) => State::SendRecvReady(t),
             (Poll::Ready(Some(Ok(t))), false) => State::SendReady(t),
-            (Poll::Ready(None), _) => self.poll_stream_sink(cx),
+            (Poll::Ready(None), _) => {
+                zelf.stream.set(None);
+                self.poll_stream_sink(cx)
+            }
             (Poll::Ready(Some(Err(e))), _) => State::Error(e),
         }
     }
@@ -518,7 +564,7 @@ where
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<Option<Is>, Self::Error>> {
-        let zelf = self.project();
+        let mut zelf = self.project();
 
         let ready = match zelf.sink.poll_close(&mut *cx) {
             Poll::Pending => false,
@@ -526,20 +572,260 @@ where
             Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
         };
 
-        if zelf.stream.is_terminated() {
+        let Some(stream) = zelf.stream.as_mut().as_pin_mut() else {
             return if ready {
                 Poll::Ready(Ok(None))
             } else {
                 Poll::Pending
             };
+        };
+
+        match stream.poll_next(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Some(Ok(t))) => Poll::Ready(Ok(Some(t))),
+            Poll::Ready(None) => {
+                zelf.stream.set(None);
+                if ready {
+                    Poll::Ready(Ok(None))
+                } else {
+                    Poll::Pending
+                }
+            }
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Err(e)),
+        }
+    }
+}
+
+pin_project! {
+    pub struct StreamSinkWrapper<SI, RI, E, T: ?Sized> {
+        phantom: PhantomData<(SI, RI, E)>,
+
+        stream_done: bool,
+
+        #[pin]
+        inner: T,
+    }
+}
+
+impl<SI, RI, E, T> StreamSinkWrapper<SI, RI, E, T>
+where
+    T: Stream<Item = SI> + Sink<RI, Error = E> + Sized,
+{
+    #[inline]
+    pub fn new(value: T) -> Self {
+        Self {
+            stream_done: false,
+            inner: value,
+            phantom: PhantomData,
+        }
+    }
+}
+
+impl<SI, RI, E, T> StreamSinkWrapper<SI, RI, E, T> {
+    #[inline]
+    pub fn unwrap_inner(self) -> T {
+        self.inner
+    }
+}
+
+impl<SI, RI, E, T: ?Sized> StreamSinkWrapper<SI, RI, E, T> {
+    #[inline]
+    pub fn get_inner(&mut self) -> &mut T {
+        &mut self.inner
+    }
+
+    #[inline]
+    pub fn get_pinned_inner(self: Pin<&mut Self>) -> Pin<&mut T> {
+        self.project().inner
+    }
+}
+
+pin_project! {
+    pub struct StreamSinkFallibleWrapper<SI, RI, E, T: ?Sized> {
+        phantom: PhantomData<(SI, RI, E)>,
+
+        stream_done: bool,
+
+        #[pin]
+        inner: T,
+    }
+}
+
+impl<SI, RI, E, T> StreamSinkFallibleWrapper<SI, RI, E, T>
+where
+    T: Stream<Item = Result<SI, E>> + Sink<RI, Error = E> + Sized,
+{
+    #[inline]
+    pub fn new(value: T) -> Self {
+        Self {
+            stream_done: false,
+            inner: value,
+            phantom: PhantomData,
+        }
+    }
+}
+
+impl<SI, RI, E, T> StreamSinkFallibleWrapper<SI, RI, E, T> {
+    #[inline]
+    pub fn unwrap_inner(self) -> T {
+        self.inner
+    }
+}
+
+impl<SI, RI, E, T: ?Sized> StreamSinkFallibleWrapper<SI, RI, E, T> {
+    #[inline]
+    pub fn get_inner(&mut self) -> &mut T {
+        &mut self.inner
+    }
+
+    #[inline]
+    pub fn get_pinned_inner(self: Pin<&mut Self>) -> Pin<&mut T> {
+        self.project().inner
+    }
+}
+
+impl<SI, RI, E, T> StreamSink<SI, RI> for StreamSinkWrapper<SI, RI, E, T>
+where
+    T: Stream<Item = SI> + Sink<RI, Error = E> + ?Sized,
+{
+    type Error = E;
+
+    fn poll_stream_sink(self: Pin<&mut Self>, cx: &mut Context<'_>) -> State<SI, E> {
+        let mut zelf = self.project();
+
+        let stream_res = if *zelf.stream_done {
+            Poll::Ready(None)
+        } else {
+            zelf.inner.as_mut().poll_next(&mut *cx)
+        };
+        *zelf.stream_done = *zelf.stream_done || matches!(stream_res, Poll::Ready(None));
+
+        if *zelf.stream_done {
+            return match zelf.inner.poll_close(cx) {
+                Poll::Pending => State::Pending,
+                Poll::Ready(Ok(_)) => State::End,
+                Poll::Ready(Err(e)) => State::Error(e),
+            };
         }
 
-        match (zelf.stream.poll_next(cx), ready) {
-            (Poll::Pending, _) => Poll::Pending,
-            (Poll::Ready(Some(Ok(t))), _) => Poll::Ready(Ok(Some(t))),
-            (Poll::Ready(None), true) => Poll::Ready(Ok(None)),
-            (Poll::Ready(None), false) => Poll::Pending,
-            (Poll::Ready(Some(Err(e))), _) => Poll::Ready(Err(e)),
+        let ready = match zelf.inner.poll_ready(&mut *cx) {
+            Poll::Pending => false,
+            Poll::Ready(Ok(_)) => true,
+            Poll::Ready(Err(e)) => return State::Error(e),
+        };
+        match (stream_res, ready) {
+            (Poll::Pending, true) => State::RecvReady,
+            (Poll::Pending, false) => State::Pending,
+            (Poll::Ready(Some(t)), true) => State::SendRecvReady(t),
+            (Poll::Ready(Some(t)), false) => State::SendReady(t),
+            (Poll::Ready(None), _) => unreachable!("Stream end should be handled earlier"),
+        }
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: RI) -> Result<(), E> {
+        self.project().inner.start_send(item)
+    }
+
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<Option<SI>, E>> {
+        let mut zelf = self.project();
+
+        let ready = match zelf.inner.as_mut().poll_close(&mut *cx) {
+            Poll::Pending => false,
+            Poll::Ready(Ok(_)) => true,
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+        };
+
+        let stream_res = if *zelf.stream_done {
+            Poll::Ready(None)
+        } else {
+            zelf.inner.poll_next(cx)
+        };
+
+        match stream_res {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Some(t)) => Poll::Ready(Ok(Some(t))),
+            Poll::Ready(None) => {
+                *zelf.stream_done = true;
+                if ready {
+                    Poll::Ready(Ok(None))
+                } else {
+                    Poll::Pending
+                }
+            }
+        }
+    }
+}
+
+impl<SI, RI, E, T> StreamSink<SI, RI> for StreamSinkFallibleWrapper<SI, RI, E, T>
+where
+    T: Stream<Item = Result<SI, E>> + Sink<RI, Error = E> + ?Sized,
+{
+    type Error = E;
+
+    fn poll_stream_sink(self: Pin<&mut Self>, cx: &mut Context<'_>) -> State<SI, E> {
+        let mut zelf = self.project();
+
+        let stream_res = if *zelf.stream_done {
+            Poll::Ready(None)
+        } else {
+            zelf.inner.as_mut().poll_next(&mut *cx)
+        };
+        *zelf.stream_done = *zelf.stream_done || matches!(stream_res, Poll::Ready(None));
+
+        if *zelf.stream_done {
+            return match zelf.inner.poll_close(cx) {
+                Poll::Pending => State::Pending,
+                Poll::Ready(Ok(_)) => State::End,
+                Poll::Ready(Err(e)) => State::Error(e),
+            };
+        }
+
+        let ready = match zelf.inner.poll_ready(&mut *cx) {
+            Poll::Pending => false,
+            Poll::Ready(Ok(_)) => true,
+            Poll::Ready(Err(e)) => return State::Error(e),
+        };
+        match (stream_res, ready) {
+            (Poll::Pending, true) => State::RecvReady,
+            (Poll::Pending, false) => State::Pending,
+            (Poll::Ready(Some(Ok(t))), true) => State::SendRecvReady(t),
+            (Poll::Ready(Some(Ok(t))), false) => State::SendReady(t),
+            (Poll::Ready(None), _) => unreachable!("Stream end should be handled earlier"),
+            (Poll::Ready(Some(Err(e))), _) => State::Error(e),
+        }
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: RI) -> Result<(), E> {
+        self.project().inner.start_send(item)
+    }
+
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<Option<SI>, E>> {
+        let mut zelf = self.project();
+
+        let ready = match zelf.inner.as_mut().poll_close(&mut *cx) {
+            Poll::Pending => false,
+            Poll::Ready(Ok(_)) => true,
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+        };
+
+        let stream_res = if *zelf.stream_done {
+            Poll::Ready(None)
+        } else {
+            zelf.inner.poll_next(cx)
+        };
+
+        match stream_res {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Some(Ok(t))) => Poll::Ready(Ok(Some(t))),
+            Poll::Ready(None) => {
+                *zelf.stream_done = true;
+                if ready {
+                    Poll::Ready(Ok(None))
+                } else {
+                    Poll::Pending
+                }
+            }
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Err(e)),
         }
     }
 }
