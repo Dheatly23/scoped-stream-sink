@@ -1,4 +1,5 @@
 use std::fmt;
+use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -439,6 +440,122 @@ where
     }
 }
 
+pin_project! {
+    pub struct Ready<'a, T: ?Sized, SI, RI> {
+        ptr: Pin<&'a mut T>,
+        phantom: PhantomData<(SI, RI)>,
+    }
+}
+
+impl<'a, T, SI, RI> Future for Ready<'a, T, SI, RI>
+where
+    T: ?Sized + StreamSink<SI, RI>,
+{
+    type Output = Result<(Option<SI>, bool), T::Error>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let zelf = self.project();
+
+        match zelf.ptr.as_mut().poll_stream_sink(cx) {
+            State::Pending => Poll::Pending,
+            State::Error(e) => Poll::Ready(Err(e)),
+            State::End => Poll::Ready(Ok((None, false))),
+            State::RecvReady => Poll::Ready(Ok((None, true))),
+            State::SendReady(i) => Poll::Ready(Ok((Some(i), false))),
+            State::SendRecvReady(i) => Poll::Ready(Ok((Some(i), true))),
+        }
+    }
+}
+
+pin_project! {
+    pub struct TrySendOne<'a, T: ?Sized, SI, F> {
+        ptr: Pin<&'a mut T>,
+        f: Option<F>,
+        phantom: PhantomData<SI>,
+    }
+}
+
+impl<'a, T, SI, RI, F> Future for TrySendOne<'a, T, SI, F>
+where
+    F: FnOnce() -> RI,
+    T: ?Sized + StreamSink<SI, RI>,
+{
+    type Output = Result<Option<SI>, T::Error>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let zelf = self.project();
+
+        let mut f = || {
+            zelf.f
+                .take()
+                .expect("Future should not be polled after completion")()
+        };
+        match zelf.ptr.as_mut().poll_stream_sink(cx) {
+            State::Pending => Poll::Pending,
+            State::Error(e) => Poll::Ready(Err(e)),
+            State::End => Poll::Ready(Ok(None)),
+            State::SendReady(i) => Poll::Ready(Ok(Some(i))),
+            State::RecvReady => match zelf.ptr.as_mut().start_send(f()) {
+                Ok(_) => Poll::Ready(Ok(None)),
+                Err(e) => Poll::Ready(Err(e)),
+            },
+            State::SendRecvReady(i) => match zelf.ptr.as_mut().start_send(f()) {
+                Ok(_) => Poll::Ready(Ok(Some(i))),
+                Err(e) => Poll::Ready(Err(e)),
+            },
+        }
+    }
+}
+
+pin_project! {
+    pub struct TrySendFuture<'a, T: ?Sized, SI, F> {
+        ptr: Pin<&'a mut T>,
+        #[pin]
+        fut: F,
+        send: Option<SI>,
+        ready: bool,
+    }
+}
+
+impl<'a, T, SI, RI, F> Future for TrySendFuture<'a, T, SI, F>
+where
+    T: ?Sized + StreamSink<SI, RI>,
+    F: Future<Output = Result<RI, T::Error>>,
+{
+    type Output = Result<Option<SI>, T::Error>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let zelf = self.project();
+
+        while !*zelf.ready {
+            return match zelf.ptr.as_mut().poll_stream_sink(&mut *cx) {
+                State::Pending => Poll::Pending,
+                State::Error(e) => Poll::Ready(Err(e)),
+                State::End => Poll::Ready(Ok(None)),
+                State::RecvReady => {
+                    *zelf.ready = true;
+                    break;
+                }
+                State::SendReady(i) => Poll::Ready(Ok(Some(i))),
+                State::SendRecvReady(i) => {
+                    *zelf.ready = true;
+                    *zelf.send = Some(i);
+                    break;
+                }
+            };
+        }
+
+        match zelf.fut.poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Ready(Ok(r)) => match zelf.ptr.as_mut().start_send(r) {
+                Err(e) => Poll::Ready(Err(e)),
+                Ok(_) => Poll::Ready(Ok(zelf.send.take())),
+            },
+        }
+    }
+}
+
 pub trait StreamSinkExt<SendItem, RecvItem = SendItem>: StreamSink<SendItem, RecvItem> {
     fn send_one<'a>(
         self: Pin<&'a mut Self>,
@@ -477,6 +594,36 @@ pub trait StreamSinkExt<SendItem, RecvItem = SendItem>: StreamSink<SendItem, Rec
         Close {
             ptr: Some(self),
             phantom: PhantomData,
+        }
+    }
+
+    fn ready<'a>(self: Pin<&'a mut Self>) -> Ready<'a, Self, SendItem, RecvItem> {
+        Ready {
+            ptr: self,
+            phantom: PhantomData,
+        }
+    }
+
+    fn try_send_one<'a, F: FnOnce() -> RecvItem>(
+        self: Pin<&'a mut Self>,
+        f: F,
+    ) -> TrySendOne<'a, Self, SendItem, F> {
+        TrySendOne {
+            ptr: self,
+            f: Some(f),
+            phantom: PhantomData,
+        }
+    }
+
+    fn try_send_future<'a, F: Future<Output = Result<RecvItem, Self::Error>>>(
+        self: Pin<&'a mut Self>,
+        fut: F,
+    ) -> TrySendFuture<'a, Self, SendItem, F> {
+        TrySendFuture {
+            ptr: self,
+            fut,
+            send: None,
+            ready: false,
         }
     }
 }
