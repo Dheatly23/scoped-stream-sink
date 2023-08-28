@@ -3,7 +3,7 @@
 //! This crate contains [`ScopedStream`] and [`ScopedSink`] type.
 //! They use normal Rust lifetime mechanism to ensure safety
 //! (eg. sending interior data outside of it's scope).
-//! Unlike [async_stream](https://docs.rs/async-stream/latest/async_stream/),
+//! Unlike [`async_stream`](https://docs.rs/async-stream/latest/async_stream/),
 //! it doesn't use macro.
 //!
 //! # Examples

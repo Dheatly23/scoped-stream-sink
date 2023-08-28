@@ -16,7 +16,7 @@ pin_project! {
     /// hassle of manually constructing one or using macros
     /// (like [`async_stream`](https://docs.rs/async-stream/latest/async_stream/)).
     /// Safety is guaranteed by carefully scoping [`StreamInner`],
-    /// similiar to [`std::thread::scope()`].
+    /// similiar to [`scope`](std::thread::scope).
     pub struct ScopedStream<'env, T> {
         fut: Option<Pin<Box<dyn Future<Output = ()> + Send + 'env>>>,
 
@@ -52,7 +52,7 @@ pin_project! {
     ///
     /// Even though [`StreamInner`] is both [`Send`] and [`Sink`], it's reference
     /// **should** not be sent across thread. This is currently impossible, due to
-    /// lack of async version of [`std::thread::scope()`].
+    /// lack of async version of [`scope`](std::thread::scope).
     /// To future-proof that possibility, any usage of it will panic if called from different
     /// thread than the outer thread. It also may panics outer thread too.
     pub struct StreamInner<'scope, 'env: 'scope, T> {
@@ -71,7 +71,7 @@ pin_project! {
     ///
     /// Even though [`TryStreamInner`] is both [`Send`] and [`Sink`], it's reference
     /// **should** not be sent across thread. This is currently impossible, due to
-    /// lack of async version of [`std::thread::scope()`].
+    /// lack of async version of [`scope`](std::thread::scope).
     /// To future-proof that possibility, any usage of it will panic if called from different
     /// thread than the outer thread. It also may panics outer thread too.
     pub struct TryStreamInner<'scope, 'env: 'scope, T, E> {
@@ -85,31 +85,33 @@ pin_project! {
 
 impl<'env, T> ScopedStream<'env, T> {
     /// Create new [`ScopedStream`].
+    ///
     /// Future must return unit type. If you want fallible future, use [`ScopedTryStream`].
     ///
     /// # Examples
     ///
     /// ```
-    /// # tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
-    /// # use scoped_stream_sink::ScopedStream;
     /// // Helper methods for stream
     /// use futures_util::{SinkExt, StreamExt};
     ///
-    /// let mut stream = <ScopedStream<usize>>::new(|mut sink| Box::pin(async move {
-    ///     // Send a value.
-    ///     // It is okay to unwrap() because it is infallible.
-    ///     sink.send(1).await.unwrap();
+    /// use scoped_stream_sink::ScopedStream;
     ///
-    ///     // (Optional) close the sink. NOTE: sink cannot be used afterwards.
-    ///     // sink.close().await.unwrap();
-    /// }));
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let mut stream = <ScopedStream<usize>>::new(|mut sink| Box::pin(async move {
+    ///         // Send a value.
+    ///         // It is okay to unwrap() because it is infallible.
+    ///         sink.send(1).await.unwrap();
     ///
-    /// // Receive all values
-    /// while let Some(i) = stream.next().await {
-    ///     println!("{i}");
+    ///         // (Optional) close the sink. NOTE: sink cannot be used afterwards.
+    ///         // sink.close().await.unwrap();
+    ///     }));
+    ///
+    ///     // Receive all values
+    ///     while let Some(i) = stream.next().await {
+    ///         println!("{i}");
+    ///     }
     /// }
-    ///
-    /// # });
     /// ```
     pub fn new<F>(f: F) -> Self
     where
@@ -140,31 +142,36 @@ impl<'env, T> ScopedStream<'env, T> {
 impl<'env, T, E> ScopedTryStream<'env, T, E> {
     /// Create new [`ScopedTryStream`].
     ///
+    /// Future can fails, and it's sink can receive [`Result`] type too (see [`TryStreamInner`]).
+    ///
     /// # Examples
     ///
     /// ```
-    /// # tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
-    /// # use scoped_stream_sink::ScopedTryStream;
     /// use anyhow::Error;
     /// // Helper methods for stream
     /// use futures_util::{SinkExt, StreamExt};
     ///
-    /// let mut stream = <ScopedTryStream<usize, Error>>::new(|mut sink| Box::pin(async move {
-    ///     // Send a value.
-    ///     sink.send(1).await?;
+    /// use scoped_stream_sink::ScopedTryStream;
     ///
-    ///     // (Optional) close the sink. NOTE: sink cannot be used afterwards.
-    ///     // sink.close().await.unwrap();
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let mut stream = <ScopedTryStream<_, Error>>::new(|mut sink| Box::pin(async move {
+    ///         // Send a value.
+    ///         sink.send(1).await?;
+    ///
+    ///         // (Optional) close the sink. NOTE: sink cannot be used afterwards.
+    ///         // sink.close().await.unwrap();
+    ///
+    ///         Ok(())
+    ///     }));
+    ///
+    ///     // Receive all values
+    ///     while let Some(i) = stream.next().await.transpose()? {
+    ///         println!("{i}");
+    ///     }
     ///
     ///     Ok(())
-    /// }));
-    ///
-    /// // Receive all values
-    /// while let Some(i) = stream.next().await.transpose()? {
-    ///     println!("{i}");
     /// }
-    ///
-    /// # Ok::<(), Error>(()) });
     /// ```
     pub fn new<F>(f: F) -> Self
     where
