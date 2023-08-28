@@ -91,6 +91,9 @@ pub use crate::scoped_stream_sink::*;
 pub use crate::stream_sink::*;
 pub use crate::stream_sink_ext::*;
 
+pub use futures_core::Stream;
+pub use futures_sink::Sink;
+
 pub(crate) mod sealed {
     pub(crate) trait Sealed {}
 }
