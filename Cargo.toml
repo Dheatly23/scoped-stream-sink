@@ -2,6 +2,7 @@
 name = "scoped-stream-sink"
 version = "1.0.0"
 edition = "2021"
+repository = "https://github.com/Dheatly23/scoped-stream-sink"
 description = "Easy way to make streams and sinks"
 keywords = ["async", "stream", "sink"]
 authors = ["Dheatly23 <71598333+Dheatly23@users.noreply.github.com>"]
