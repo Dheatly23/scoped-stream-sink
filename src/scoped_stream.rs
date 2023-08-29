@@ -212,7 +212,7 @@ impl<'env, T> Stream for ScopedStream<'env, T> {
         };
 
         this.data.as_mut().project().inner.set_inner_ctx();
-        if let Poll::Ready(_) = fut.poll(cx) {
+        if fut.poll(cx).is_ready() {
             *this.fut = None;
         }
 

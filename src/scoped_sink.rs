@@ -188,7 +188,7 @@ impl<'env, T: 'env, E: 'env> Sink<T> for ScopedSink<'env, T, E> {
             // Dispose future.
             *this.inner = None;
 
-            if let Err(_) = v {
+            if v.is_err() {
                 return Poll::Ready(v);
             }
         }

@@ -687,13 +687,13 @@ where
                 State::End => Poll::Ready(Ok(None)),
                 State::RecvReady => {
                     *zelf.ready = true;
-                    break;
+                    continue;
                 }
                 State::SendReady(i) => Poll::Ready(Ok(Some(i))),
                 State::SendRecvReady(i) => {
                     *zelf.ready = true;
                     *zelf.send = Some(i);
-                    break;
+                    continue;
                 }
             };
         }

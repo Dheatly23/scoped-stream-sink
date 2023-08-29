@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity)]
+
 //! Make asynchronous [`Stream`](futures_core::Stream) and [`Sink`](futures_sink::Sink) easy.
 //!
 //! This crate contains [`ScopedStream`] and [`ScopedSink`] type.
@@ -122,7 +124,10 @@ impl<T> LocalThread<T> {
         }
     }
 
+    #[allow(clippy::mut_from_ref)]
     pub(crate) fn get_inner(&self) -> &mut T {
+        // Allows nested ifs to help separate operations that must be sequential
+        #[allow(clippy::collapsible_if)]
         if !self.lock.swap(true, Ordering::SeqCst) {
             if self.thread == current().id() {
                 self.lock.store(false, Ordering::SeqCst);
@@ -135,6 +140,7 @@ impl<T> LocalThread<T> {
         panic!("Called from other thread!");
     }
 
+    #[allow(clippy::mut_from_ref)]
     pub(crate) fn set_inner_ctx(&mut self) -> &mut T {
         if !self.lock.swap(true, Ordering::SeqCst) {
             self.thread = current().id();
