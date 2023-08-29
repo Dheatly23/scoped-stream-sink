@@ -8,6 +8,44 @@
 //!
 //! # Examples
 //!
+//! Using [`ScopedStream`]:
+//! ```
+//! use std::time::Duration;
+//!
+//! use futures_sink::Sink;
+//! use futures_core::Stream;
+//! use futures_util::{SinkExt, StreamExt};
+//!
+//! use scoped_stream_sink::*;
+//!
+//! #[tokio::main]
+//! async fn main() {
+//!     // Create new scoped stream
+//!     let mut stream = ScopedStream::new(|mut sink| Box::pin(async move {
+//!         // We have to Box::pin it because otherwise the trait bounds is too complex
+//!         // Interior sink cannot outlast the lifetime of it's outer stream
+//!
+//!         // This will not work
+//!         // tokio::spawn(async move { sink.send(10000).await.unwrap() }).await.unwrap();
+//!
+//!         // Assume this is a complex task
+//!         let (mut a, mut b) = (1usize, 1);
+//!         for _ in 0..10 {
+//!             sink.send(a).await.unwrap();
+//!             (a, b) = (b, a + b);
+//!             tokio::time::sleep(Duration::from_millis(100)).await;
+//!         }
+//!     }));
+//!
+//!     let mut v = Vec::new();
+//!     while let Some(i) = stream.next().await {
+//!         v.push(i);
+//!     }
+//!     println!("{v:?}");
+//! }
+//! ```
+//!
+//! Using [`ScopedSink`]:
 //! ```
 //! use std::time::Duration;
 //!
@@ -18,29 +56,10 @@
 //!
 //! use scoped_stream_sink::*;
 //!
-//! // Function to make a new stream
-//! async fn make_stream(n: usize) -> impl Stream<Item = usize> {
-//!     // Create new scoped stream
-//!     ScopedStream::new(|mut sink| Box::pin(async move {
-//!         // We have to Box::pin it because otherwise the trait bounds is too complex
-//!         // Interior sink cannot outlast the lifetime of it's outer stream
-//!
-//!         // This does not work
-//!         // tokio::spawn(async move { sink.send(10000).await.unwrap() }).await.unwrap();
-//!
-//!         // Assume this is a complex task
-//!         let (mut a, mut b) = (1, 1);
-//!         for _ in 0..n {
-//!             sink.send(a).await.unwrap();
-//!             (a, b) = (b, a + b);
-//!             tokio::time::sleep(Duration::from_millis(100)).await;
-//!         }
-//!     }))
-//! }
-//!
-//! // Function to make a new sink
-//! async fn make_sink() -> impl Sink<usize, Error = Error> {
-//!     ScopedSink::new(|mut stream| Box::pin(async move {
+//! #[tokio::main]
+//! async fn main() -> Result<(), Error> {
+//!     // Create new sink
+//!     let mut sink = <ScopedSink<usize, Error>>::new(|mut stream| Box::pin(async move {
 //!         // Unlike ScopedStream, this closure will be called over and over again,
 //!         // until all values are consumed
 //!
@@ -51,21 +70,8 @@
 //!         }
 //!
 //!         Ok(())
-//!     }))
-//! }
+//!     }));
 //!
-//! #[tokio::main]
-//! async fn main() -> Result<(), Error> {
-//!     // Using stream
-//!     let mut stream = make_stream(10).await;
-//!     let mut v = Vec::new();
-//!     while let Some(i) = stream.next().await {
-//!         v.push(i);
-//!     }
-//!     println!("{v:?}");
-//!
-//!     // Using sink
-//!     let mut sink = make_sink().await;
 //!     for i in 0..10 {
 //!         sink.send(i).await?;
 //!     }
