@@ -89,8 +89,11 @@ mod scoped_stream_sink;
 mod stream_sink;
 mod stream_sink_ext;
 
-use std::mem::transmute;
+use core::mem::transmute;
+
+#[cfg(feature = "std")]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "std")]
 use std::thread::{current, ThreadId};
 
 pub use crate::scoped_sink::*;
@@ -106,6 +109,7 @@ pub(crate) mod sealed {
     pub(crate) trait Sealed {}
 }
 
+#[cfg(feature = "std")]
 /// Protects value within local thread. Call [`Self::get_inner()`] to protect inner access
 /// to within thread. Call [`Self::set_inner_ctx()`] to set the context.
 pub(crate) struct LocalThread<T> {
@@ -115,6 +119,7 @@ pub(crate) struct LocalThread<T> {
     inner: T,
 }
 
+#[cfg(feature = "std")]
 impl<T> LocalThread<T> {
     pub(crate) fn new(inner: T) -> Self {
         Self {

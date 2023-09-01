@@ -9,9 +9,17 @@ authors = ["Dheatly23 <71598333+Dheatly23@users.noreply.github.com>"]
 license = "Apache-2.0"
 
 [dependencies]
-futures-core = "0.3"
-futures-sink = "0.3"
 pin-project-lite = "0.2"
+
+[dependencies.futures-core]
+version = "0.3"
+default-features = false
+features = ["alloc"]
+
+[dependencies.futures-sink]
+version = "0.3"
+default-features = false
+features = ["alloc"]
 
 [dev-dependencies]
 anyhow = "1"
@@ -28,4 +36,11 @@ features = [
   "test-util",
   "macros",
   "rt-multi-thread",
+]
+
+[features]
+default = ["std"]
+std = [
+  "futures-core/std",
+  "futures-sink/std",
 ]
