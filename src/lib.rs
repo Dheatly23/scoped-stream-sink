@@ -89,6 +89,7 @@ mod scoped_stream_sink;
 mod stream_sink;
 mod stream_sink_ext;
 
+#[cfg(feature = "std")]
 use core::mem::transmute;
 
 #[cfg(feature = "std")]

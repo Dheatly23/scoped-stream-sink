@@ -327,6 +327,183 @@ impl<'scope, 'env: 'scope, T> Stream for SinkInner<'scope, 'env, T> {
     }
 }
 
+/// Erased type for the local scope function. It accepts a [`LocalSinkInner`] reference
+/// that implements [`Stream`].
+///
+/// # Examples
+///
+/// ```
+/// // Helper methods for stream
+/// use futures_util::StreamExt;
+///
+/// let func: scoped_stream_sink::DynLocalSinkFn<usize, ()> = Box::new(|mut stream| Box::pin(async move {
+///     while let Some(v) = stream.next().await {
+///         println!("Value: {v}");
+///     }
+///     Ok(())
+/// }));
+/// ```
+pub type DynLocalSinkFn<'env, T, E> = Box<
+    dyn 'env
+        + for<'scope> FnMut(
+            Pin<&'scope mut LocalSinkInner<'scope, 'env, T>>,
+        ) -> DynLocalSinkFuture<'scope, E>,
+>;
+
+/// Erased type for the locally scoped future.
+pub type DynLocalSinkFuture<'scope, E> = Pin<Box<dyn Future<Output = Result<(), E>> + 'scope>>;
+
+pin_project! {
+    /// Sink with a scoped future. Unlike [`ScopedSink`] it is not [`Send`],
+    /// so it can work in no-std environment.
+    #[must_use = "Sink will not do anything if not used"]
+    pub struct LocalScopedSink<'env, T, E> {
+        f: DynLocalSinkFn<'env, T, E>,
+        inner: Option<DynLocalSinkFuture<'env, E>>,
+
+        data: Pin<Box<LocalSinkInner<'env, 'env, T>>>,
+    }
+}
+
+pin_project! {
+    /// Inner type for [`LocalScopedSink`]. Similiar to [`SinkInner`], but not [`Send`].
+    pub struct LocalSinkInner<'scope, 'env: 'scope, T> {
+        inner: SinkInnerData<T>,
+
+        #[pin]
+        pinned: PhantomPinned,
+        phantom: PhantomData<(&'scope mut &'env T, *mut u8)>,
+    }
+}
+
+impl<'env, T: 'env, E: 'env> LocalScopedSink<'env, T, E> {
+    /// Create new [`LocalScopedSink`] from a [`DynLocalSinkFn`].
+    ///
+    /// You should probably use [`new`](Self::new) instead.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use scoped_stream_sink::LocalScopedSink;
+    /// let mut sink: LocalScopedSink<usize, ()> = LocalScopedSink::new_dyn(Box::new(|_| {
+    ///     Box::pin(async { Ok(()) })
+    /// }));
+    /// ```
+    pub fn new_dyn(f: DynLocalSinkFn<'env, T, E>) -> Self {
+        Self {
+            data: Box::pin(LocalSinkInner {
+                inner: SinkInnerData {
+                    data: None,
+                    closed: false,
+                },
+
+                pinned: PhantomPinned,
+                phantom: PhantomData,
+            }),
+
+            f,
+            inner: None,
+        }
+    }
+
+    /// Create new [`LocalScopedSink`].
+    ///
+    /// Future should be consuming all items of the stream.
+    /// If not, the function will be called again to restart itself.
+    /// It is guaranteed if the sink is closed, the future will never restarts.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use anyhow::Error;
+    /// // Helper methods for stream
+    /// use futures_util::{SinkExt, StreamExt};
+    ///
+    /// use scoped_stream_sink::LocalScopedSink;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let mut sink = <LocalScopedSink<_, Error>>::new(|mut stream| Box::pin(async move {
+    ///         // Reads a value. If future returns before sink is closed, it will be restarted.
+    ///         if let Some(v) = stream.next().await {
+    ///             println!("Value: {v}");
+    ///         }
+    ///         Ok(())
+    ///     }));
+    ///
+    ///     // Send a value
+    ///     sink.send(1).await?;
+    ///
+    ///     // Close the sink
+    ///     sink.close().await?;
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
+    pub fn new<F>(f: F) -> Self
+    where
+        for<'scope> F: 'env
+            + FnMut(Pin<&'scope mut LocalSinkInner<'scope, 'env, T>>) -> DynLocalSinkFuture<'scope, E>,
+    {
+        Self::new_dyn(Box::new(f))
+    }
+}
+
+impl<'env, T: 'env, E: 'env> LocalScopedSink<'env, T, E> {
+    fn future_wrapper(
+        self: Pin<&mut Self>,
+    ) -> (
+        &mut SinkInnerData<T>,
+        &mut Option<DynLocalSinkFuture<'env, E>>,
+        impl FnMut() -> DynLocalSinkFuture<'env, E> + '_,
+    ) {
+        let this = self.project();
+        // SAFETY: We constrained data lifetime to be 'scope.
+        // Since 'scope is contained within self, it is safe to extend it.
+        let f = unsafe {
+            make_future(
+                NonNull::from(this.data.as_mut().get_unchecked_mut()),
+                this.f,
+            )
+        };
+
+        (this.data.as_mut().project().inner, this.inner, f)
+    }
+}
+
+impl<'env, T: 'env, E: 'env> Sink<T> for LocalScopedSink<'env, T, E> {
+    type Error = E;
+
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), E>> {
+        self.poll_flush(cx)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), E>> {
+        let (data, fut, f) = self.future_wrapper();
+
+        data.flush(cx, fut, f)
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: T) -> Result<(), E> {
+        self.project().data.as_mut().project().inner.send(item);
+        Ok(())
+    }
+
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), E>> {
+        let (data, fut, f) = self.future_wrapper();
+
+        data.close(cx, fut, f)
+    }
+}
+
+impl<'scope, 'env: 'scope, T> Stream for LocalSinkInner<'scope, 'env, T> {
+    type Item = T;
+
+    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.project().inner.next()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

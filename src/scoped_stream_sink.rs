@@ -306,3 +306,160 @@ impl<'scope, 'env: 'scope, SI, RI, E> Sink<SI> for SinkPart<'scope, 'env, SI, RI
         <Self as Sink<Result<SI, E>>>::poll_close(self, cx)
     }
 }
+
+pin_project! {
+    /// Locally scoped version of [`StreamSink`]. Does not implement [`Send`].
+    pub struct LocalScopedStreamSink<'env, SI, RI, E> {
+        fut: Option<Pin<Box<dyn Future<Output = Result<(), E>> + 'env>>>,
+
+        data: Pin<Box<LocalStreamSinkInner<'env, 'env, SI, RI, E>>>,
+    }
+}
+
+pin_project! {
+    struct LocalStreamSinkInner<'scope, 'env: 'scope, SI, RI, E> {
+        inner: StreamSinkInnerData<SI, RI, E>,
+
+        #[pin]
+        pinned: PhantomPinned,
+        phantom: PhantomData<(&'scope mut &'env (SI, RI, E), *mut u8)>,
+    }
+}
+
+pin_project! {
+    /// [`Stream`] half of inner [`LocalScopedStreamSink`].
+    /// Produce receive type values.
+    /// Can only be closed from it's outer [`LocalScopedStreamSink`].
+    pub struct LocalStreamPart<'scope, 'env: 'scope, SI, RI, E> {
+        ptr: Pin<&'scope mut LocalStreamSinkInner<'scope, 'env, SI, RI, E>>,
+    }
+}
+
+pin_project! {
+    /// [`Sink`] half of inner [`LocalScopedStreamSink`].
+    /// Can receive both send type or a [`Result`] type.
+    /// Closing will complete when outer [`LocalScopedStreamSink`] is closed and received all data.
+    pub struct LocalSinkPart<'scope, 'env: 'scope, SI, RI, E> {
+        ptr: Pin<&'scope mut LocalStreamSinkInner<'scope, 'env, SI, RI, E>>,
+    }
+}
+
+impl<'env, SI, RI, E> LocalScopedStreamSink<'env, SI, RI, E> {
+    /// Creates new [`LocalScopedStreamSink`].
+    /// Safety is guaranteed by scoping both [`LocalStreamPart`] and [`LocalSinkPart`].
+    pub fn new<F>(f: F) -> Self
+    where
+        for<'scope> F: FnOnce(
+            LocalStreamPart<'scope, 'env, SI, RI, E>,
+            LocalSinkPart<'scope, 'env, SI, RI, E>,
+        ) -> Pin<Box<dyn Future<Output = Result<(), E>> + 'scope>>,
+    {
+        let mut data = Box::pin(LocalStreamSinkInner {
+            inner: StreamSinkInnerData {
+                send: None,
+                recv: None,
+                close_send: false,
+                close_recv: false,
+            },
+
+            pinned: PhantomPinned,
+            phantom: PhantomData,
+        });
+
+        let (stream, sink);
+        // SAFETY: Borrow is scoped, so it can't get out of scope.
+        // Also, StreamPart and SinkPart write access is separated.
+        unsafe {
+            stream = LocalStreamPart {
+                ptr: transmute::<Pin<&mut LocalStreamSinkInner<SI, RI, E>>, _>(data.as_mut()),
+            };
+            sink = LocalSinkPart {
+                ptr: transmute::<Pin<&mut LocalStreamSinkInner<SI, RI, E>>, _>(data.as_mut()),
+            };
+        }
+        let fut = f(stream, sink);
+
+        Self {
+            fut: Some(fut),
+            data,
+        }
+    }
+}
+
+impl<'env, SI, RI, E> StreamSink<SI, RI> for LocalScopedStreamSink<'env, SI, RI, E> {
+    type Error = E;
+
+    fn poll_stream_sink(self: Pin<&mut Self>, cx: &mut Context<'_>) -> State<SI, Self::Error> {
+        let this = self.project();
+        this.data.as_mut().project().inner.stream_sink(cx, this.fut)
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: RI) -> Result<(), Self::Error> {
+        self.project()
+            .data
+            .as_mut()
+            .project()
+            .inner
+            .send_outer(item);
+        Ok(())
+    }
+
+    fn poll_close(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Option<SI>, Self::Error>> {
+        let this = self.project();
+        this.data.as_mut().project().inner.close_outer(cx, this.fut)
+    }
+}
+
+impl<'scope, 'env: 'scope, SI, RI, E> Stream for LocalStreamPart<'scope, 'env, SI, RI, E> {
+    type Item = RI;
+
+    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.project().ptr.as_mut().project().inner.next()
+    }
+}
+
+impl<'scope, 'env: 'scope, SI, RI, E> Sink<Result<SI, E>>
+    for LocalSinkPart<'scope, 'env, SI, RI, E>
+{
+    type Error = Infallible;
+
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        <Self as Sink<Result<SI, E>>>::poll_flush(self, cx)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.project().ptr.as_mut().project().inner.flush()
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: Result<SI, E>) -> Result<(), Self::Error> {
+        self.project().ptr.as_mut().project().inner.send_inner(item);
+        Ok(())
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.project().ptr.as_mut().project().inner.close_inner()
+    }
+}
+
+impl<'scope, 'env: 'scope, SI, RI, E> Sink<SI> for LocalSinkPart<'scope, 'env, SI, RI, E> {
+    type Error = Infallible;
+
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        <Self as Sink<Result<SI, E>>>::poll_flush(self, cx)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        <Self as Sink<Result<SI, E>>>::poll_flush(self, cx)
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: SI) -> Result<(), Self::Error> {
+        <Self as Sink<Result<SI, E>>>::start_send(self, Ok(item))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        <Self as Sink<Result<SI, E>>>::poll_close(self, cx)
+    }
+}

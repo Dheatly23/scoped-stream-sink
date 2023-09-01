@@ -13,7 +13,9 @@ use pin_project_lite::pin_project;
 #[cfg(feature = "std")]
 use crate::LocalThread;
 
+#[cfg(feature = "std")]
 type DynStreamFut<'scope> = Pin<Box<dyn Future<Output = ()> + Send + 'scope>>;
+#[cfg(feature = "std")]
 type DynTryStreamFut<'scope, E> = Pin<Box<dyn Future<Output = Result<(), E>> + Send + 'scope>>;
 
 #[cfg(feature = "std")]
@@ -363,6 +365,250 @@ impl<'scope, 'env: 'scope, T, E> Sink<Result<T, E>> for TryStreamInner<'scope, '
 
 #[cfg(feature = "std")]
 impl<'scope, 'env: 'scope, T, E> Sink<T> for TryStreamInner<'scope, 'env, T, E> {
+    type Error = Infallible;
+
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
+        <Self as Sink<Result<T, E>>>::poll_flush(self, cx)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
+        <Self as Sink<Result<T, E>>>::poll_flush(self, cx)
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: T) -> Result<(), Infallible> {
+        <Self as Sink<Result<T, E>>>::start_send(self, Ok(item))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
+        <Self as Sink<Result<T, E>>>::poll_close(self, cx)
+    }
+}
+
+type DynLocalStreamFut<'scope> = Pin<Box<dyn Future<Output = ()> + 'scope>>;
+type DynLocalTryStreamFut<'scope, E> = Pin<Box<dyn Future<Output = Result<(), E>> + 'scope>>;
+
+pin_project! {
+    /// Stream with a scoped future. Unlike [`ScopedStream`] it is not [`Send`],
+    /// so it can work in no-std environment.
+    pub struct LocalScopedStream<'env, T> {
+        fut: Option<DynLocalStreamFut<'env>>,
+
+        data: Pin<Box<LocalStreamInner<'env, 'env, T>>>,
+    }
+}
+
+pin_project! {
+    /// [`ScopedTryStream`] equivalent, but not [`Send`],
+    pub struct LocalScopedTryStream<'env, T, E> {
+        fut: Option<DynLocalTryStreamFut<'env, E>>,
+
+        data: Pin<Box<LocalTryStreamInner<'env, 'env, T, E>>>,
+    }
+}
+
+pin_project! {
+    /// Inner type of [`ScopedStream`]. Similiar to [`StreamInner`] but not [`Send`].
+    pub struct LocalStreamInner<'scope, 'env: 'scope, T> {
+        inner: StreamInnerData<T>,
+
+        #[pin]
+        pinned: PhantomPinned,
+        phantom: PhantomData<(&'scope mut &'env T, *mut u8)>,
+    }
+}
+
+pin_project! {
+    /// Inner type of [`ScopedTryStream`]. Similiar to [`TryStreamInner`] but not [`Send`].
+    pub struct LocalTryStreamInner<'scope, 'env: 'scope, T, E> {
+        inner: StreamInnerData<Result<T, E>>,
+
+        #[pin]
+        pinned: PhantomPinned,
+        phantom: PhantomData<(&'scope mut &'env (T, E), *mut u8)>,
+    }
+}
+
+impl<'env, T> LocalScopedStream<'env, T> {
+    /// Create new [`LocalScopedStream`].
+    ///
+    /// Future must return unit type. If you want fallible future, use [`LocalScopedTryStream`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Helper methods for stream
+    /// use futures_util::{SinkExt, StreamExt};
+    ///
+    /// use scoped_stream_sink::LocalScopedStream;
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let mut stream = <LocalScopedStream<usize>>::new(|mut sink| Box::pin(async move {
+    ///         // Send a value.
+    ///         // It is okay to unwrap() because it is infallible.
+    ///         sink.send(1).await.unwrap();
+    ///
+    ///         // (Optional) close the sink. NOTE: sink cannot be used afterwards.
+    ///         // sink.close().await.unwrap();
+    ///     }));
+    ///
+    ///     // Receive all values
+    ///     while let Some(i) = stream.next().await {
+    ///         println!("{i}");
+    ///     }
+    /// }
+    /// ```
+    pub fn new<F>(f: F) -> Self
+    where
+        for<'scope> F: FnOnce(
+            Pin<&'scope mut LocalStreamInner<'scope, 'env, T>>,
+        ) -> Pin<Box<dyn Future<Output = ()> + 'scope>>,
+    {
+        let mut data = Box::pin(LocalStreamInner {
+            inner: StreamInnerData {
+                data: None,
+                closed: false,
+            },
+
+            pinned: PhantomPinned,
+            phantom: PhantomData,
+        });
+
+        let ptr = unsafe { transmute::<Pin<&mut LocalStreamInner<T>>, _>(data.as_mut()) };
+        let fut = f(ptr);
+
+        Self {
+            fut: Some(fut),
+            data,
+        }
+    }
+}
+
+impl<'env, T, E> LocalScopedTryStream<'env, T, E> {
+    /// Create new [`LocalScopedTryStream`].
+    ///
+    /// Future can fails, and it's sink can receive [`Result`] type too (see [`LocalTryStreamInner`]).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use anyhow::Error;
+    /// // Helper methods for stream
+    /// use futures_util::{SinkExt, StreamExt};
+    ///
+    /// use scoped_stream_sink::LocalScopedTryStream;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let mut stream = <LocalScopedTryStream<_, Error>>::new(|mut sink| Box::pin(async move {
+    ///         // Send a value.
+    ///         sink.send(1).await?;
+    ///
+    ///         // (Optional) close the sink. NOTE: sink cannot be used afterwards.
+    ///         // sink.close().await.unwrap();
+    ///
+    ///         Ok(())
+    ///     }));
+    ///
+    ///     // Receive all values
+    ///     while let Some(i) = stream.next().await.transpose()? {
+    ///         println!("{i}");
+    ///     }
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
+    pub fn new<F>(f: F) -> Self
+    where
+        for<'scope> F: FnOnce(
+            Pin<&'scope mut LocalTryStreamInner<'scope, 'env, T, E>>,
+        ) -> Pin<Box<dyn Future<Output = Result<(), E>> + 'scope>>,
+    {
+        let mut data = Box::pin(LocalTryStreamInner {
+            inner: StreamInnerData {
+                data: None,
+                closed: false,
+            },
+
+            pinned: PhantomPinned,
+            phantom: PhantomData,
+        });
+
+        let ptr = unsafe { transmute::<Pin<&mut LocalTryStreamInner<T, E>>, _>(data.as_mut()) };
+        let fut = f(ptr);
+
+        Self {
+            fut: Some(fut),
+            data,
+        }
+    }
+}
+
+impl<'env, T> Stream for LocalScopedStream<'env, T> {
+    type Item = T;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.project();
+        this.data.as_mut().project().inner.next(cx, this.fut)
+    }
+}
+
+impl<'env, T, E> Stream for LocalScopedTryStream<'env, T, E> {
+    type Item = Result<T, E>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.project();
+        this.data
+            .as_mut()
+            .project()
+            .inner
+            .next_fallible(cx, this.fut)
+    }
+}
+
+impl<'scope, 'env: 'scope, T> Sink<T> for LocalStreamInner<'scope, 'env, T> {
+    type Error = Infallible;
+
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.poll_flush(cx)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.project().inner.flush()
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: T) -> Result<(), Self::Error> {
+        self.project().inner.send(item);
+        Ok(())
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.project().inner.close()
+    }
+}
+
+impl<'scope, 'env: 'scope, T, E> Sink<Result<T, E>> for LocalTryStreamInner<'scope, 'env, T, E> {
+    type Error = Infallible;
+
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
+        <Self as Sink<Result<T, E>>>::poll_flush(self, cx)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
+        self.project().inner.flush()
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: Result<T, E>) -> Result<(), Infallible> {
+        self.project().inner.send(item);
+        Ok(())
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
+        self.project().inner.close()
+    }
+}
+
+impl<'scope, 'env: 'scope, T, E> Sink<T> for LocalTryStreamInner<'scope, 'env, T, E> {
     type Error = Infallible;
 
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
