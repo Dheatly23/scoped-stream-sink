@@ -432,4 +432,167 @@ mod tests {
         })
         .await
     }
+
+    #[tokio::test]
+    async fn test_recv_yield() -> AnyResult<()> {
+        let mut stream = <ScopedStream<usize>>::new(|_| {
+            Box::pin(async move {
+                for _ in 0..5 {
+                    yield_now().await;
+                }
+            })
+        });
+
+        test_helper(async move {
+            assert_eq!(stream.next().await, None);
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_recv_many() -> AnyResult<()> {
+        let mut stream = <ScopedStream<usize>>::new(|mut sink| {
+            Box::pin(async move {
+                for i in 0..10 {
+                    sink.send(i).await.unwrap();
+                }
+            })
+        });
+
+        test_helper(async move {
+            for i in 0..10 {
+                assert_eq!(stream.next().await, Some(i));
+            }
+            assert_eq!(stream.next().await, None);
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_recv_many_yield() -> AnyResult<()> {
+        let mut stream = <ScopedStream<usize>>::new(|mut sink| {
+            Box::pin(async move {
+                for i in 0..10 {
+                    sink.send(i).await.unwrap();
+                    for _ in 0..i {
+                        yield_now().await;
+                    }
+                }
+            })
+        });
+
+        test_helper(async move {
+            for i in 0..10 {
+                assert_eq!(stream.next().await, Some(i));
+            }
+            assert_eq!(stream.next().await, None);
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_try_simple() -> AnyResult<()> {
+        let mut stream = <ScopedTryStream<usize, AnyError>>::new(|_| Box::pin(async { Ok(()) }));
+
+        test_helper(async move {
+            assert_eq!(stream.next().await.transpose()?, None);
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_try_recv_one() -> AnyResult<()> {
+        let mut stream = <ScopedTryStream<usize, AnyError>>::new(|mut src| {
+            Box::pin(async move {
+                src.send(1).await.unwrap();
+
+                Ok(())
+            })
+        });
+
+        test_helper(async move {
+            assert_eq!(stream.next().await.transpose()?, Some(1));
+            assert_eq!(stream.next().await.transpose()?, None);
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_try_recv_yield() -> AnyResult<()> {
+        let mut stream = <ScopedTryStream<usize, AnyError>>::new(|_| {
+            Box::pin(async move {
+                for _ in 0..5 {
+                    yield_now().await;
+                }
+
+                Ok(())
+            })
+        });
+
+        test_helper(async move {
+            assert_eq!(stream.next().await.transpose()?, None);
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_try_recv_many() -> AnyResult<()> {
+        let mut stream = <ScopedTryStream<usize, AnyError>>::new(|mut sink| {
+            Box::pin(async move {
+                for i in 0..10 {
+                    sink.send(i).await.unwrap();
+                }
+
+                Ok(())
+            })
+        });
+
+        test_helper(async move {
+            for i in 0..10 {
+                assert_eq!(stream.next().await.transpose()?, Some(i));
+            }
+            assert_eq!(stream.next().await.transpose()?, None);
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_try_recv_many_yield() -> AnyResult<()> {
+        let mut stream = <ScopedTryStream<usize, AnyError>>::new(|mut sink| {
+            Box::pin(async move {
+                for i in 0..10 {
+                    sink.send(i).await?;
+                    for _ in 0..i {
+                        yield_now().await;
+                    }
+                }
+
+                Ok(())
+            })
+        });
+
+        test_helper(async move {
+            for i in 0..10 {
+                assert_eq!(stream.next().await.transpose()?, Some(i));
+            }
+            assert_eq!(stream.next().await.transpose()?, None);
+
+            Ok(())
+        })
+        .await
+    }
 }
