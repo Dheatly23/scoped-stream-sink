@@ -9,6 +9,7 @@ use pin_project_lite::pin_project;
 use crate::{State, StreamSink};
 
 pin_project! {
+    /// Return type of [`StreamSinkExt::map_send()`].
     pub struct MapSend<T, F, I> {
         #[pin]
         t: T,
@@ -57,6 +58,7 @@ where
 }
 
 pin_project! {
+    /// Return type of [`StreamSinkExt::map_recv()`].
     pub struct MapRecv<T, F, I> {
         #[pin]
         t: T,
@@ -91,6 +93,7 @@ where
 }
 
 pin_project! {
+    /// Return type of [`StreamSinkExt::map_error()`].
     pub struct MapError<T, F> {
         #[pin]
         t: T,
@@ -142,6 +145,7 @@ where
 }
 
 pin_project! {
+    /// Return type of [`StreamSinkExt::error_cast()`].
     pub struct ErrorCast<T, E> {
         #[pin]
         t: T,
@@ -196,6 +200,7 @@ enum ChainState {
 }
 
 pin_project! {
+    /// Return type of [`StreamSinkExt::chain()`].
     pub struct Chain<U, V, II> {
         #[pin]
         u: U,
@@ -316,6 +321,7 @@ where
 }
 
 pin_project! {
+    /// Return type of [`StreamSinkExt::send_one()`].
     pub struct SendOne<'a, T: ?Sized, SI, RI, E> {
         value: Option<(Pin<&'a mut T>, RI)>,
         error: Option<E>,
@@ -385,6 +391,7 @@ where
 }
 
 pin_project! {
+    /// Return type of [`StreamSinkExt::send_iter()`].
     pub struct SendIter<'a, T: ?Sized, SI, RI, IT, E> {
         value: Option<(Pin<&'a mut T>, IT)>,
         error: Option<E>,
@@ -466,6 +473,7 @@ where
 }
 
 pin_project! {
+    /// Return type of [`StreamSinkExt::send_try_iter()`].
     pub struct SendTryIter<'a, T: ?Sized, SI, RI, IT, E> {
         value: Option<(Pin<&'a mut T>, IT)>,
         error: Option<E>,
@@ -548,6 +556,7 @@ where
 }
 
 pin_project! {
+    /// Return type of [`StreamSinkExt::close()`].
     pub struct Close<'a, T: ?Sized, SI, RI> {
         ptr: Option<Pin<&'a mut T>>,
         phantom: PhantomData<(SI, RI)>,
@@ -594,6 +603,7 @@ where
 }
 
 pin_project! {
+    /// Return type of [`StreamSinkExt::ready()`].
     pub struct Ready<'a, T: ?Sized, SI, RI> {
         ptr: Pin<&'a mut T>,
         phantom: PhantomData<(SI, RI)>,
@@ -621,6 +631,7 @@ where
 }
 
 pin_project! {
+    /// Return type of [`StreamSinkExt::try_send_one()`].
     pub struct TrySendOne<'a, T: ?Sized, SI, F> {
         ptr: Pin<&'a mut T>,
         f: Option<F>,
@@ -661,6 +672,7 @@ where
 }
 
 pin_project! {
+    /// Return type of [`StreamSinkExt::try_send_future()`].
     pub struct TrySendFuture<'a, T: ?Sized, SI, F> {
         ptr: Pin<&'a mut T>,
         #[pin]
@@ -709,7 +721,9 @@ where
     }
 }
 
+/// Extension trait for [`StreamSink`]. Contains helper methods for using [`StreamSink`].
 pub trait StreamSinkExt<SendItem, RecvItem = SendItem>: StreamSink<SendItem, RecvItem> {
+    /// Maps the `SendItem`.
     fn map_send<F, I>(self, f: F) -> MapSend<Self, F, SendItem>
     where
         Self: Sized,
@@ -722,6 +736,7 @@ pub trait StreamSinkExt<SendItem, RecvItem = SendItem>: StreamSink<SendItem, Rec
         }
     }
 
+    /// Maps the `RecvItem`.
     fn map_recv<F, I>(self, f: F) -> MapRecv<Self, F, RecvItem>
     where
         Self: Sized,
@@ -734,6 +749,7 @@ pub trait StreamSinkExt<SendItem, RecvItem = SendItem>: StreamSink<SendItem, Rec
         }
     }
 
+    /// Cast the error type.
     fn error_cast<E>(self) -> ErrorCast<Self, E>
     where
         Self: Sized,
@@ -745,6 +761,10 @@ pub trait StreamSinkExt<SendItem, RecvItem = SendItem>: StreamSink<SendItem, Rec
         }
     }
 
+    /// Chain two [`StreamSink`].
+    ///
+    /// If either of the [`StreamSink`] ends, the other one will try to be closed.
+    /// Some data may gets lost because of that.
     fn chain<Other, Item>(self, other: Other) -> Chain<Self, Other, SendItem>
     where
         Self: Sized,
@@ -758,6 +778,10 @@ pub trait StreamSinkExt<SendItem, RecvItem = SendItem>: StreamSink<SendItem, Rec
         }
     }
 
+    /// Send one item.
+    ///
+    /// The resulting [`Stream`] may be dropped at anytime, with only consequence is loss of item.
+    /// To not lose the item, use [`try_send_one`](Self::try_send_one).
     fn send_one<'a>(
         self: Pin<&'a mut Self>,
         item: RecvItem,
@@ -769,6 +793,9 @@ pub trait StreamSinkExt<SendItem, RecvItem = SendItem>: StreamSink<SendItem, Rec
         }
     }
 
+    /// Send items from an [`IntoIterator`].
+    ///
+    /// The resulting [`Stream`] may be dropped at anytime, with no loss of item.
     fn send_iter<'a, I: IntoIterator<Item = RecvItem>>(
         self: Pin<&'a mut Self>,
         iter: I,
@@ -780,6 +807,9 @@ pub trait StreamSinkExt<SendItem, RecvItem = SendItem>: StreamSink<SendItem, Rec
         }
     }
 
+    /// Send items from a fallible [`IntoIterator`].
+    ///
+    /// The resulting [`Stream`] may be dropped at anytime, with no loss of item.
     fn send_try_iter<'a, I: IntoIterator<Item = Result<RecvItem, Self::Error>>>(
         self: Pin<&'a mut Self>,
         iter: I,
@@ -791,6 +821,9 @@ pub trait StreamSinkExt<SendItem, RecvItem = SendItem>: StreamSink<SendItem, Rec
         }
     }
 
+    /// Closes the [`StreamSink`].
+    ///
+    /// You must handle all items that came out of the resulting [`Stream`].
     fn close<'a>(self: Pin<&'a mut Self>) -> Close<'a, Self, SendItem, RecvItem> {
         Close {
             ptr: Some(self),
@@ -798,6 +831,14 @@ pub trait StreamSinkExt<SendItem, RecvItem = SendItem>: StreamSink<SendItem, Rec
         }
     }
 
+    /// Polls until it's ready. It is safe drop the [`Future`] before it's ready (cancel-safety).
+    ///
+    /// Possible return value (after awaited):
+    /// - `Err(error)` : Error happened.
+    /// - `Ok((None, false))` : [`StreamSink`] is closed.
+    /// - `Ok((Some(item), false))` : An item is sent.
+    /// - `Ok((None, true))` : Ready to receive item.
+    /// - `Ok((Some(item), true))` : Item is sent and it's ready to receive another item.
     fn ready<'a>(self: Pin<&'a mut Self>) -> Ready<'a, Self, SendItem, RecvItem> {
         Ready {
             ptr: self,
@@ -805,6 +846,8 @@ pub trait StreamSinkExt<SendItem, RecvItem = SendItem>: StreamSink<SendItem, Rec
         }
     }
 
+    /// Try to send an item.
+    /// It is safe to drop the [`Future`] before it's ready.
     fn try_send_one<'a, F: FnOnce() -> RecvItem>(
         self: Pin<&'a mut Self>,
         f: F,
@@ -816,6 +859,8 @@ pub trait StreamSinkExt<SendItem, RecvItem = SendItem>: StreamSink<SendItem, Rec
         }
     }
 
+    /// Try to send an item using [`Future`].
+    /// It is cancen-safe if and only if the inner [`Future`] is also cancel-safe.
     fn try_send_future<'a, F: Future<Output = Result<RecvItem, Self::Error>>>(
         self: Pin<&'a mut Self>,
         fut: F,

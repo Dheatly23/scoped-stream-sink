@@ -7,13 +7,30 @@ use futures_core::Stream;
 use futures_sink::Sink;
 use pin_project_lite::pin_project;
 
+/// State enum for [`StreamSink`].
+///
+/// Due to it's complexity, the state of [`StreamSink`] is represented by this enum.
+/// Should be equivalent to `Poll<Result<(Option<T>, bool), E>>`.
+///
+/// Implements many useful [`From`] traits to ease conversion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum State<T, E> {
+    /// Is pending.
     Pending,
+
+    /// Is erroring.
     Error(E),
+
+    /// Ready to receive item.
     RecvReady,
+
+    /// Has item to send.
     SendReady(T),
+
+    /// Combines [`RecvReady`](Self::RecvReady) and [`SendReady`](Self::SendReady).
     SendRecvReady(T),
+
+    /// Has no more data to send and cannot receive data anymore.
     End,
 }
 
@@ -120,26 +137,31 @@ impl<T, E> From<State<T, E>> for Result<(Poll<Option<T>>, Poll<()>), E> {
 }
 
 impl<T, E> State<T, E> {
+    /// Returns `true` if state is pending.
     #[inline]
     pub fn is_pending(&self) -> bool {
         matches!(self, Self::Pending)
     }
 
+    /// Returns `true` if state is ready to receive item.
     #[inline]
     pub fn is_recv(&self) -> bool {
         matches!(self, Self::RecvReady | Self::SendRecvReady(_))
     }
 
+    /// Returns `true` if state has an item to send.
     #[inline]
     pub fn is_send(&self) -> bool {
         matches!(self, Self::SendReady(_) | Self::SendRecvReady(_))
     }
 
+    /// Returns `true` if state is ended
     #[inline]
     pub fn is_end(&self) -> bool {
         matches!(self, Self::End)
     }
 
+    /// Unwraps it's content (if any).
     pub fn unwrap_content(self) -> Result<Option<T>, E> {
         match self {
             Self::Error(e) => Err(e),
@@ -149,12 +171,34 @@ impl<T, E> State<T, E> {
     }
 }
 
+/// Combines [`Stream`] and [`Sink`] into one trait.
+///
+/// Unlike each of it's part, [`StreamSink`] is capable of simultaneously poll
+/// for sending and receiving. This allows for workflow such as packet processor to be done
+/// without making separate pipe for sending and receiving.
 pub trait StreamSink<SendItem, RecvItem = SendItem> {
+    /// The error type that it may return.
     type Error;
 
+    /// Poll the [`StreamSink`].
+    ///
+    /// Due to complexity of it's state, it does not return the usual [`Poll`] enum
+    /// like other poll-like methods. See [`State`] for more info.
     fn poll_stream_sink(self: Pin<&mut Self>, cx: &mut Context<'_>)
         -> State<SendItem, Self::Error>;
+
+    /// Starts sending item into [`StreamSink`].
+    ///
+    /// **WARNING: May panics if [`StreamSink`] is not ready to receive.**
     fn start_send(self: Pin<&mut Self>, item: RecvItem) -> Result<(), Self::Error>;
+
+    /// Close the [`StreamSink`] from outside. Implementation must be idempotent.
+    ///
+    /// Meaning of value returned:
+    /// - `Poll::Pending` : Pending to be closed, poll again in the future.
+    /// - `Poll::Ready(Err(error))` : Error happened.
+    /// - `Poll::Ready(Ok(Some(item)))` : [`StreamSink`] wants to send more item as cleanup.
+    /// - `Poll::Ready(Ok(None))` : [`StreamSink`] is finalized.
     fn poll_close(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -218,6 +262,8 @@ where
 }
 
 pin_project! {
+    /// Wraps a pair of [`Stream`] and [`Sink`].
+    /// Implements [`StreamSink`].
     pub struct StreamSinkPair<S, R> {
         #[pin]
         stream: Option<S>,
@@ -228,6 +274,7 @@ pin_project! {
 }
 
 impl<S, R> StreamSinkPair<S, R> {
+    /// Creates new [`StreamSinkPair`].
     #[inline]
     pub fn new(stream: S, sink: R) -> Self {
         Self {
@@ -236,17 +283,20 @@ impl<S, R> StreamSinkPair<S, R> {
         }
     }
 
+    /// Gets reference for inner data.
     #[inline]
     pub fn get_pair(&mut self) -> (Option<&mut S>, &mut R) {
         (self.stream.as_mut(), &mut self.sink)
     }
 
+    /// Gets pinned reference for inner data.
     #[inline]
     pub fn get_pinned_pair(self: Pin<&mut Self>) -> (Option<Pin<&mut S>>, Pin<&mut R>) {
         let zelf = self.project();
         (zelf.stream.as_pin_mut(), zelf.sink)
     }
 
+    /// Unwraps self into it's content.
     #[inline]
     pub fn unwrap_pair(self) -> (Option<S>, R) {
         (self.stream, self.sink)
@@ -331,6 +381,9 @@ where
 }
 
 pin_project! {
+    /// Wraps a type that implements both [`Stream`] and [`Sink`].
+    /// Although such type is not very usable, both implementation is combined here
+    /// into [`StreamSink`].
     pub struct StreamSinkWrapper<SI, RI, E, T: ?Sized> {
         phantom: PhantomData<(SI, RI, E)>,
 
@@ -345,6 +398,7 @@ impl<SI, RI, E, T> StreamSinkWrapper<SI, RI, E, T>
 where
     T: Stream<Item = SI> + Sink<RI, Error = E> + Sized,
 {
+    /// Creates a new [`StreamSinkWrapper`].
     #[inline]
     pub fn new(value: T) -> Self {
         Self {
@@ -375,6 +429,10 @@ impl<SI, RI, E, T: ?Sized> StreamSinkWrapper<SI, RI, E, T> {
 }
 
 pin_project! {
+    /// Wraps a type that implements both [`Stream`] and [`Sink`]
+    /// where the [`Stream`] half returns a [`Result`].
+    /// Although such type is not very usable, both implementation is combined here
+    /// into [`StreamSink`].
     pub struct StreamSinkFallibleWrapper<SI, RI, E, T: ?Sized> {
         phantom: PhantomData<(SI, RI, E)>,
 
@@ -389,6 +447,7 @@ impl<SI, RI, E, T> StreamSinkFallibleWrapper<SI, RI, E, T>
 where
     T: Stream<Item = Result<SI, E>> + Sink<RI, Error = E> + Sized,
 {
+    /// Creates a new [`StreamSinkFallibleWrapper`].
     #[inline]
     pub fn new(value: T) -> Self {
         Self {
