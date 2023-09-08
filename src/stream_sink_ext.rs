@@ -406,8 +406,8 @@ where
 {
     type Item = Result<SI, E>;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let zelf = self.project();
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let zelf = self.as_mut().project();
         if let Some(e) = zelf.error.take() {
             *zelf.value = None;
             return Poll::Ready(Some(Err(e)));
@@ -443,7 +443,7 @@ where
                     *zelf.value = None;
                     Poll::Ready(Some(Err(e)))
                 } else {
-                    Poll::Ready(None)
+                    self.poll_next(cx)
                 }
             }
             State::End => {
@@ -488,8 +488,8 @@ where
 {
     type Item = Result<SI, E>;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let zelf = self.project();
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let zelf = self.as_mut().project();
         if let Some(e) = zelf.error.take() {
             *zelf.value = None;
             return Poll::Ready(Some(Err(e)));
@@ -526,7 +526,7 @@ where
                     *zelf.value = None;
                     Poll::Ready(Some(Err(e)))
                 } else {
-                    Poll::Ready(None)
+                    self.poll_next(cx)
                 }
             }
             State::End => {
@@ -884,3 +884,204 @@ pub trait StreamSinkExt<SendItem, RecvItem = SendItem>: StreamSink<SendItem, Rec
 }
 
 impl<SI, RI, T> StreamSinkExt<SI, RI> for T where T: StreamSink<SI, RI> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ScopedStreamSink;
+
+    use std::pin::pin;
+    use std::time::Duration;
+
+    use anyhow::{bail, Error as AnyError, Result as AnyResult};
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::task::yield_now;
+    use tokio::time::timeout;
+
+    async fn test_helper<F>(f: F) -> AnyResult<()>
+    where
+        F: Future<Output = AnyResult<()>> + Send,
+    {
+        match timeout(Duration::from_secs(5), f).await {
+            Ok(v) => v,
+            Err(_) => bail!("Time ran out"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ready_simple() -> AnyResult<()> {
+        let v = <ScopedStreamSink<usize, usize, AnyError>>::new(|_, _| Box::pin(async { Ok(()) }));
+
+        test_helper(async move {
+            let v = pin!(v);
+            assert_eq!(v.ready().await?, (None, false));
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_ready_send() -> AnyResult<()> {
+        let v = <ScopedStreamSink<usize, usize, AnyError>>::new(|_, mut sink| {
+            Box::pin(async move {
+                for i in 0..10 {
+                    sink.send(i).await?;
+                    for _ in 0..i {
+                        yield_now().await;
+                    }
+                }
+
+                Ok(())
+            })
+        });
+
+        test_helper(async move {
+            let mut v = pin!(v);
+            for i in 0..10 {
+                assert_eq!(v.as_mut().ready().await?, (Some(i), true));
+                for _ in 0..i {
+                    assert_eq!(v.as_mut().ready().await?, (None, true));
+                }
+            }
+            assert_eq!(v.as_mut().ready().await?, (None, false));
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_close_send() -> AnyResult<()> {
+        let v = <ScopedStreamSink<usize, usize, AnyError>>::new(|_, mut sink| {
+            Box::pin(async move {
+                for i in 0..10 {
+                    sink.send(i).await?;
+                    for _ in 0..i {
+                        yield_now().await;
+                    }
+                }
+
+                Ok(())
+            })
+        });
+
+        test_helper(async move {
+            let mut v = pin!(v);
+            let mut s = v.as_mut().close();
+            for i in 0..10 {
+                assert_eq!(s.next().await.transpose()?, Some(i));
+            }
+            assert_eq!(s.next().await.transpose()?, None);
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_transform() -> AnyResult<()> {
+        let v = <ScopedStreamSink<usize, usize, AnyError>>::new(|mut stream, mut sink| {
+            Box::pin(async move {
+                while let Some(v) = stream.next().await {
+                    sink.send(v * 2).await?;
+                }
+
+                Ok(())
+            })
+        });
+
+        test_helper(async move {
+            let mut v = pin!(v);
+            for i in 0..10 {
+                let mut s = v.as_mut().send_one(i);
+                assert_eq!(s.next().await.transpose()?, None);
+                assert_eq!(v.as_mut().ready().await?.0, Some(i * 2));
+            }
+            assert_eq!(v.close().next().await.transpose()?, None);
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_transform_iter() -> AnyResult<()> {
+        let v = <ScopedStreamSink<usize, usize, AnyError>>::new(|mut stream, mut sink| {
+            Box::pin(async move {
+                while let Some(v) = stream.next().await {
+                    sink.send(v * 2).await?;
+                }
+
+                Ok(())
+            })
+        });
+
+        test_helper(async move {
+            let mut v = pin!(v);
+            let mut s = v.as_mut().send_iter(0..10);
+            for i in 0..10 {
+                assert_eq!(s.next().await.transpose()?, Some(i * 2));
+            }
+            assert_eq!(s.next().await.transpose()?, None);
+            assert_eq!(v.close().next().await.transpose()?, None);
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_map_send() -> AnyResult<()> {
+        let v = <ScopedStreamSink<usize, usize, AnyError>>::new(|mut stream, mut sink| {
+            Box::pin(async move {
+                while let Some(v) = stream.next().await {
+                    sink.send(v * 2).await?;
+                }
+
+                Ok(())
+            })
+        })
+        .map_send(|v| v + 10);
+
+        test_helper(async move {
+            let mut v = pin!(v);
+            for i in 0..10 {
+                let mut s = v.as_mut().send_one(i);
+                assert_eq!(s.next().await.transpose()?, None);
+                assert_eq!(v.as_mut().ready().await?.0, Some(i * 2 + 10));
+            }
+            assert_eq!(v.close().next().await.transpose()?, None);
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_map_recv() -> AnyResult<()> {
+        let v = <ScopedStreamSink<usize, usize, AnyError>>::new(|mut stream, mut sink| {
+            Box::pin(async move {
+                while let Some(v) = stream.next().await {
+                    sink.send(v * 2).await?;
+                }
+
+                Ok(())
+            })
+        })
+        .map_recv(|v| v + 10);
+
+        test_helper(async move {
+            let mut v = pin!(v);
+            for i in 0..10 {
+                let mut s = v.as_mut().send_one(i);
+                assert_eq!(s.next().await.transpose()?, None);
+                assert_eq!(v.as_mut().ready().await?.0, Some((i + 10) * 2));
+            }
+            assert_eq!(v.close().next().await.transpose()?, None);
+
+            Ok(())
+        })
+        .await
+    }
+}
