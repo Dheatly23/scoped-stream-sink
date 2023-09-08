@@ -1,7 +1,7 @@
-use std::fmt;
-use std::marker::PhantomData;
-use std::pin::Pin;
-use std::task::{Context, Poll};
+use core::fmt;
+use core::marker::PhantomData;
+use core::pin::Pin;
+use core::task::{Context, Poll};
 
 use futures_core::Stream;
 use futures_sink::Sink;

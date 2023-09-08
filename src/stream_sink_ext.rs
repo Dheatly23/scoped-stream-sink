@@ -1,7 +1,7 @@
-use std::future::Future;
-use std::marker::PhantomData;
-use std::pin::Pin;
-use std::task::{Context, Poll};
+use core::future::Future;
+use core::marker::PhantomData;
+use core::pin::Pin;
+use core::task::{Context, Poll};
 
 use futures_core::{FusedStream, Stream};
 use pin_project_lite::pin_project;
@@ -21,7 +21,7 @@ pin_project! {
 impl<T, F, SI, RI, I> StreamSink<SI, RI> for MapSend<T, F, I>
 where
     T: StreamSink<I, RI>,
-    F: Fn(I) -> SI,
+    F: FnMut(I) -> SI,
 {
     type Error = T::Error;
 
@@ -70,7 +70,7 @@ pin_project! {
 impl<T, F, SI, RI, I> StreamSink<SI, RI> for MapRecv<T, F, I>
 where
     T: StreamSink<SI, I>,
-    F: Fn(RI) -> I,
+    F: FnMut(RI) -> I,
 {
     type Error = T::Error;
 
@@ -104,7 +104,7 @@ pin_project! {
 impl<T, F, SI, RI, E> StreamSink<SI, RI> for MapError<T, F>
 where
     T: StreamSink<SI, RI>,
-    F: Fn(T::Error) -> E,
+    F: FnMut(T::Error) -> E,
 {
     type Error = E;
 
@@ -727,7 +727,7 @@ pub trait StreamSinkExt<SendItem, RecvItem = SendItem>: StreamSink<SendItem, Rec
     fn map_send<F, I>(self, f: F) -> MapSend<Self, F, SendItem>
     where
         Self: Sized,
-        F: Fn(SendItem) -> I,
+        F: FnMut(SendItem) -> I,
     {
         MapSend {
             t: self,
@@ -737,16 +737,25 @@ pub trait StreamSinkExt<SendItem, RecvItem = SendItem>: StreamSink<SendItem, Rec
     }
 
     /// Maps the `RecvItem`.
-    fn map_recv<F, I>(self, f: F) -> MapRecv<Self, F, RecvItem>
+    fn map_recv<F, I>(self, f: F) -> MapRecv<Self, F, I>
     where
         Self: Sized,
-        F: Fn(RecvItem) -> I,
+        F: FnMut(I) -> RecvItem,
     {
         MapRecv {
             t: self,
             f,
             phantom: PhantomData,
         }
+    }
+
+    /// Maps the error type.
+    fn map_error<F, E>(self, f: F) -> MapError<Self, F>
+    where
+        Self: Sized,
+        F: FnMut(Self::Error) -> E,
+    {
+        MapError { t: self, f }
     }
 
     /// Cast the error type.
