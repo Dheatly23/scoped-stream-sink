@@ -226,6 +226,9 @@ impl<T> SinkInnerData<T> {
         // There is still some data
         if self.data.is_some() {
             let ret = self.flush(cx, &mut *fut, f);
+            if let Poll::Ready(Err(_)) = ret {
+                return ret;
+            }
             return match fut {
                 // Must have been pending then.
                 Some(_) => Poll::Pending,
