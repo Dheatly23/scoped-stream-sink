@@ -169,34 +169,36 @@ impl<T> SinkInnerData<T> {
         U::Target: Future<Output = Result<(), E>>,
         F: FnMut() -> Pin<U>,
     {
-        if self.data.is_none() {
-            // No need to poll future.
-            return Poll::Ready(Ok(()));
-        }
-
-        let fp = if let Some(v) = fut {
-            v
-        } else if self.closed {
-            return Poll::Ready(Ok(()));
-        } else {
-            fut.get_or_insert_with(&mut f)
-        };
-
-        if let Poll::Ready(v) = fp.as_mut().poll(cx) {
-            // Dispose future.
-            *fut = None;
-
-            if v.is_err() {
-                return Poll::Ready(v);
+        loop {
+            if self.data.is_none() {
+                // No need to poll future.
+                return Poll::Ready(Ok(()));
             }
 
-            // We have to repoll the future, otherwise it will never be awoken.
-            return self.flush(cx, fut, f);
-        }
+            let fp = if let Some(v) = fut {
+                v
+            } else if self.closed {
+                return Poll::Ready(Ok(()));
+            } else {
+                fut.get_or_insert_with(&mut f)
+            };
 
-        match self.data {
-            Some(_) => Poll::Pending,
-            None => Poll::Ready(Ok(())),
+            if let Poll::Ready(v) = fp.as_mut().poll(cx) {
+                // Dispose future.
+                *fut = None;
+
+                if v.is_err() {
+                    return Poll::Ready(v);
+                }
+
+                // We have to repoll the future, otherwise it will never be awoken.
+                continue;
+            }
+
+            return match self.data {
+                Some(_) => Poll::Pending,
+                None => Poll::Ready(Ok(())),
+            };
         }
     }
 
