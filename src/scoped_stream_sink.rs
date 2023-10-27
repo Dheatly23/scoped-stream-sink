@@ -47,6 +47,17 @@ pin_project! {
     /// [`Stream`] half of inner [`ScopedStreamSink`].
     /// Produce receive type values.
     /// Can only be closed from it's outer [`ScopedStreamSink`].
+    ///
+    /// # Note About Thread-safety
+    ///
+    /// Even though [`StreamPart`] is both [`Send`] and [`Sink`], it's reference
+    /// **should** not be sent across thread. This is currently impossible, due to
+    /// lack of async version of [`scope`](std::thread::scope).
+    /// To future-proof that possibility, any usage of it will panic if called from different
+    /// thread than the outer thread. It also may panics outer thread too.
+    ///
+    /// Also do note that some of the check depends on `debug_assertions` build config
+    /// (AKA only on debug builds).
     pub struct StreamPart<'scope, 'env: 'scope, SI, RI, E> {
         ptr: Pin<&'scope mut StreamSinkInner<'scope, 'env, SI, RI, E>>,
     }
@@ -57,6 +68,17 @@ pin_project! {
     /// [`Sink`] half of inner [`ScopedStreamSink`].
     /// Can receive both send type or a [`Result`] type.
     /// Closing will complete when outer [`ScopedStreamSink`] is closed and received all data.
+    ///
+    /// # Note About Thread-safety
+    ///
+    /// Even though [`SinkPart`] is both [`Send`] and [`Sink`], it's reference
+    /// **should** not be sent across thread. This is currently impossible, due to
+    /// lack of async version of [`scope`](std::thread::scope).
+    /// To future-proof that possibility, any usage of it will panic if called from different
+    /// thread than the outer thread. It also may panics outer thread too.
+    ///
+    /// Also do note that some of the check depends on `debug_assertions` build config
+    /// (AKA only on debug builds).
     pub struct SinkPart<'scope, 'env: 'scope, SI, RI, E> {
         ptr: Pin<&'scope mut StreamSinkInner<'scope, 'env, SI, RI, E>>,
     }
