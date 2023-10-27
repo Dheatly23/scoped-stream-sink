@@ -264,7 +264,7 @@ impl<'env, T: 'env, E: 'env> ScopedSink<'env, T, E> {
     fn future_wrapper(
         self: Pin<&mut Self>,
     ) -> (
-        &mut SinkInnerData<T>,
+        impl DerefMut<Target = SinkInnerData<T>> + '_,
         &mut Option<DynSinkFuture<'env, E>>,
         impl FnMut() -> DynSinkFuture<'env, E> + '_,
     ) {
@@ -295,7 +295,7 @@ impl<'env, T: 'env, E: 'env> Sink<T> for ScopedSink<'env, T, E> {
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), E>> {
-        let (data, fut, f) = self.future_wrapper();
+        let (mut data, fut, f) = self.future_wrapper();
 
         data.flush(cx, fut, f)
     }
@@ -312,7 +312,7 @@ impl<'env, T: 'env, E: 'env> Sink<T> for ScopedSink<'env, T, E> {
     }
 
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), E>> {
-        let (data, fut, f) = self.future_wrapper();
+        let (mut data, fut, f) = self.future_wrapper();
 
         data.close(cx, fut, f)
     }

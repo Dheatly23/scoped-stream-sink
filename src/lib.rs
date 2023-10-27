@@ -92,9 +92,10 @@ mod stream_sink_ext;
 #[cfg(feature = "std")]
 use core::mem::transmute;
 
+use std::ops::{Deref, DerefMut};
 #[cfg(feature = "std")]
-use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(feature = "std")]
+use std::sync::atomic::{AtomicU8, Ordering};
+#[cfg(all(feature = "std", debug_assertions))]
 use std::thread::{current, ThreadId};
 
 pub use crate::scoped_sink::*;
@@ -110,50 +111,143 @@ pub(crate) mod sealed {
     pub(crate) trait Sealed {}
 }
 
+const STATE_OFF: u8 = 0;
+const STATE_ENTER: u8 = 1;
+const STATE_LOCKED: u8 = 2;
+
 #[cfg(feature = "std")]
 /// Protects value within local thread. Call [`Self::get_inner()`] to protect inner access
 /// to within thread. Call [`Self::set_inner_ctx()`] to set the context.
 pub(crate) struct LocalThread<T> {
+    #[cfg(debug_assertions)]
     thread: ThreadId,
-    lock: AtomicBool,
+    lock: AtomicU8,
 
     inner: T,
+}
+
+fn panic_expected(expect: u8, value: u8) {
+    panic!("Inconsistent internal state! (expected lock state to be {:02X}, got {:02X})\nNote: Your code might use inner value across thread", expect, value);
+}
+
+#[cfg(feature = "std")]
+pub(crate) struct LocalThreadInnerGuard<'a, T>(&'a LocalThread<T>);
+#[cfg(feature = "std")]
+pub(crate) struct LocalThreadInnerCtxGuard<'a, T>(&'a LocalThread<T>);
+
+#[cfg(feature = "std")]
+impl<'a, T> Drop for LocalThreadInnerGuard<'a, T> {
+    fn drop(&mut self) {
+        if let Err(v) = self.0.lock.compare_exchange(
+            STATE_LOCKED,
+            STATE_ENTER,
+            Ordering::Release,
+            Ordering::Relaxed,
+        ) {
+            panic_expected(STATE_LOCKED, v);
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl<'a, T> Deref for LocalThreadInnerGuard<'a, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0.inner
+    }
+}
+
+#[cfg(feature = "std")]
+impl<'a, T> DerefMut for LocalThreadInnerGuard<'a, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // SAFETY: It is locked.
+        #[allow(mutable_transmutes)]
+        unsafe {
+            transmute(&self.0.inner)
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl<'a, T> Drop for LocalThreadInnerCtxGuard<'a, T> {
+    fn drop(&mut self) {
+        if let Err(v) = self.0.lock.compare_exchange(
+            STATE_ENTER,
+            STATE_OFF,
+            Ordering::Release,
+            Ordering::Relaxed,
+        ) {
+            panic_expected(STATE_ENTER, v);
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl<'a, T> Deref for LocalThreadInnerCtxGuard<'a, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0.inner
+    }
+}
+
+#[cfg(feature = "std")]
+impl<'a, T> DerefMut for LocalThreadInnerCtxGuard<'a, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // SAFETY: It is locked.
+        #[allow(mutable_transmutes)]
+        unsafe {
+            transmute(&self.0.inner)
+        }
+    }
 }
 
 #[cfg(feature = "std")]
 impl<T> LocalThread<T> {
     pub(crate) fn new(inner: T) -> Self {
         Self {
+            #[cfg(debug_assertions)]
             thread: current().id(),
-            lock: AtomicBool::new(false),
+            lock: AtomicU8::new(STATE_OFF),
+
             inner,
         }
     }
 
     #[allow(clippy::mut_from_ref)]
-    pub(crate) fn get_inner(&self) -> &mut T {
-        // Allows nested ifs to help separate operations that must be sequential
-        #[allow(clippy::collapsible_if)]
-        if !self.lock.swap(true, Ordering::SeqCst) {
-            if self.thread == current().id() {
-                self.lock.store(false, Ordering::SeqCst);
-                // SAFETY: It is current thread.
-                #[allow(mutable_transmutes)]
-                return unsafe { transmute::<&T, &mut T>(&self.inner) };
-            }
+    pub(crate) fn get_inner<'a>(&'a self) -> LocalThreadInnerGuard<'a, T> {
+        if let Err(v) = self.lock.compare_exchange(
+            STATE_ENTER,
+            STATE_LOCKED,
+            Ordering::SeqCst,
+            Ordering::Relaxed,
+        ) {
+            panic_expected(STATE_ENTER, v);
         }
 
-        panic!("Called from other thread!");
+        #[cfg(debug_assertions)]
+        if self.thread != current().id() {
+            panic!("Called from other thread!");
+        }
+
+        LocalThreadInnerGuard(self)
     }
 
     #[allow(clippy::mut_from_ref)]
-    pub(crate) fn set_inner_ctx(&mut self) -> &mut T {
-        if !self.lock.swap(true, Ordering::SeqCst) {
-            self.thread = current().id();
-            self.lock.store(false, Ordering::SeqCst);
-            return &mut self.inner;
+    pub(crate) fn set_inner_ctx<'a>(&'a mut self) -> LocalThreadInnerCtxGuard<'a, T> {
+        if let Err(v) =
+            self.lock
+                .compare_exchange(STATE_OFF, STATE_ENTER, Ordering::SeqCst, Ordering::Relaxed)
+        {
+            panic_expected(STATE_OFF, v);
         }
 
-        panic!("Called from other thread!");
+        #[cfg(debug_assertions)]
+        {
+            self.thread = current().id();
+        }
+
+        LocalThreadInnerCtxGuard(&*self)
     }
 }
