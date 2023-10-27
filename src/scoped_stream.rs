@@ -60,6 +60,9 @@ pin_project! {
     /// lack of async version of [`scope`](std::thread::scope).
     /// To future-proof that possibility, any usage of it will panic if called from different
     /// thread than the outer thread. It also may panics outer thread too.
+    ///
+    /// Also do note that some of the check depends on `debug_assertions` build config
+    /// (AKA only on debug builds).
     pub struct StreamInner<'scope, 'env: 'scope, T> {
         inner: LocalThread<StreamInnerData<T>>,
 
@@ -80,6 +83,9 @@ pin_project! {
     /// lack of async version of [`scope`](std::thread::scope).
     /// To future-proof that possibility, any usage of it will panic if called from different
     /// thread than the outer thread. It also may panics outer thread too.
+    ///
+    /// Also do note that some of the check depends on `debug_assertions` build config
+    /// (AKA only on debug builds).
     pub struct TryStreamInner<'scope, 'env: 'scope, T, E> {
         inner: LocalThread<StreamInnerData<Result<T, E>>>,
 

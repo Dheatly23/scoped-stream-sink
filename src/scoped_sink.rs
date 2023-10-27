@@ -71,6 +71,9 @@ pin_project! {
     /// lack of async version of [`scope`](std::thread::scope).
     /// To future-proof that possibility, any usage of it will panic if called from different
     /// thread than the outer thread. It also may panics outer thread too.
+    ///
+    /// Also do note that some of the check depends on `debug_assertions` build config
+    /// (AKA only on debug builds).
     pub struct SinkInner<'scope, 'env: 'scope, T> {
         inner: LocalThread<SinkInnerData<T>>,
 
@@ -169,34 +172,36 @@ impl<T> SinkInnerData<T> {
         U::Target: Future<Output = Result<(), E>>,
         F: FnMut() -> Pin<U>,
     {
-        if self.data.is_none() {
-            // No need to poll future.
-            return Poll::Ready(Ok(()));
-        }
-
-        let fp = if let Some(v) = fut {
-            v
-        } else if self.closed {
-            return Poll::Ready(Ok(()));
-        } else {
-            fut.get_or_insert_with(&mut f)
-        };
-
-        if let Poll::Ready(v) = fp.as_mut().poll(cx) {
-            // Dispose future.
-            *fut = None;
-
-            if v.is_err() {
-                return Poll::Ready(v);
+        loop {
+            if self.data.is_none() {
+                // No need to poll future.
+                return Poll::Ready(Ok(()));
             }
 
-            // We have to repoll the future, otherwise it will never be awoken.
-            return self.flush(cx, fut, f);
-        }
+            let fp = if let Some(v) = fut {
+                v
+            } else if self.closed {
+                return Poll::Ready(Ok(()));
+            } else {
+                fut.get_or_insert_with(&mut f)
+            };
 
-        match self.data {
-            Some(_) => Poll::Pending,
-            None => Poll::Ready(Ok(())),
+            if let Poll::Ready(v) = fp.as_mut().poll(cx) {
+                // Dispose future.
+                *fut = None;
+
+                if v.is_err() {
+                    return Poll::Ready(v);
+                }
+
+                // We have to repoll the future, otherwise it will never be awoken.
+                continue;
+            }
+
+            return match self.data {
+                Some(_) => Poll::Pending,
+                None => Poll::Ready(Ok(())),
+            };
         }
     }
 
@@ -226,6 +231,9 @@ impl<T> SinkInnerData<T> {
         // There is still some data
         if self.data.is_some() {
             let ret = self.flush(cx, &mut *fut, f);
+            if let Poll::Ready(Err(_)) = ret {
+                return ret;
+            }
             return match fut {
                 // Must have been pending then.
                 Some(_) => Poll::Pending,
@@ -264,7 +272,7 @@ impl<'env, T: 'env, E: 'env> ScopedSink<'env, T, E> {
     fn future_wrapper(
         self: Pin<&mut Self>,
     ) -> (
-        &mut SinkInnerData<T>,
+        impl DerefMut<Target = SinkInnerData<T>> + '_,
         &mut Option<DynSinkFuture<'env, E>>,
         impl FnMut() -> DynSinkFuture<'env, E> + '_,
     ) {
@@ -295,7 +303,7 @@ impl<'env, T: 'env, E: 'env> Sink<T> for ScopedSink<'env, T, E> {
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), E>> {
-        let (data, fut, f) = self.future_wrapper();
+        let (mut data, fut, f) = self.future_wrapper();
 
         data.flush(cx, fut, f)
     }
@@ -312,7 +320,7 @@ impl<'env, T: 'env, E: 'env> Sink<T> for ScopedSink<'env, T, E> {
     }
 
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), E>> {
-        let (data, fut, f) = self.future_wrapper();
+        let (mut data, fut, f) = self.future_wrapper();
 
         data.close(cx, fut, f)
     }
