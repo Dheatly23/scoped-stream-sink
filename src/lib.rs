@@ -216,7 +216,7 @@ impl<T> LocalThread<T> {
     }
 
     #[allow(clippy::mut_from_ref)]
-    pub(crate) fn get_inner<'a>(&'a self) -> LocalThreadInnerGuard<'a, T> {
+    pub(crate) fn get_inner(&self) -> LocalThreadInnerGuard<'_, T> {
         if let Err(v) = self.lock.compare_exchange(
             STATE_ENTER,
             STATE_LOCKED,
@@ -235,7 +235,7 @@ impl<T> LocalThread<T> {
     }
 
     #[allow(clippy::mut_from_ref)]
-    pub(crate) fn set_inner_ctx<'a>(&'a mut self) -> LocalThreadInnerCtxGuard<'a, T> {
+    pub(crate) fn set_inner_ctx(&mut self) -> LocalThreadInnerCtxGuard<'_, T> {
         if let Err(v) =
             self.lock
                 .compare_exchange(STATE_OFF, STATE_ENTER, Ordering::SeqCst, Ordering::Relaxed)
