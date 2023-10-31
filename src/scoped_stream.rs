@@ -638,10 +638,13 @@ impl<'scope, 'env: 'scope, T, E> Sink<T> for LocalTryStreamInner<'scope, 'env, T
 mod tests {
     use super::*;
 
+    use std::pin::pin;
+    use std::ptr::NonNull;
+    use std::task::{Context, RawWaker, RawWakerVTable, Waker};
     use std::time::Duration;
 
     use anyhow::{bail, Error as AnyError, Result as AnyResult};
-    use futures_util::{SinkExt, StreamExt};
+    use futures_util::{pending, SinkExt, StreamExt};
     use tokio::task::yield_now;
     use tokio::time::timeout;
 
@@ -871,5 +874,62 @@ mod tests {
             Ok(())
         })
         .await
+    }
+
+    fn nil_waker() -> Waker {
+        fn raw() -> RawWaker {
+            RawWaker::new(NonNull::dangling().as_ptr(), &VTABLE)
+        }
+
+        unsafe fn clone(_: *const ()) -> RawWaker {
+            raw()
+        }
+        unsafe fn wake(_: *const ()) {}
+        unsafe fn wake_by_ref(_: *const ()) {}
+        unsafe fn drop(_: *const ()) {}
+
+        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake_by_ref, drop);
+
+        unsafe { Waker::from_raw(raw()) }
+    }
+
+    #[test]
+    fn test_generator() {
+        let mut stream = pin!(ScopedStream::new(|mut sink| {
+            Box::pin(async move {
+                for i in 0usize..10 {
+                    sink.send(i).await.unwrap();
+                }
+            })
+        }));
+
+        let waker = nil_waker();
+        let mut cx = Context::from_waker(&waker);
+        for j in 0usize..10 {
+            assert_eq!(stream.as_mut().poll_next(&mut cx), Poll::Ready(Some(j)));
+        }
+
+        assert_eq!(stream.as_mut().poll_next(&mut cx), Poll::Ready(None));
+    }
+
+    #[test]
+    fn test_generator_yield() {
+        let mut stream = pin!(ScopedStream::new(|mut sink| {
+            Box::pin(async move {
+                for i in 0usize..10 {
+                    sink.send(i).await.unwrap();
+                    pending!();
+                }
+            })
+        }));
+
+        let waker = nil_waker();
+        let mut cx = Context::from_waker(&waker);
+        for j in 0usize..10 {
+            assert_eq!(stream.as_mut().poll_next(&mut cx), Poll::Ready(Some(j)));
+            assert_eq!(stream.as_mut().poll_next(&mut cx), Poll::Pending);
+        }
+
+        assert_eq!(stream.as_mut().poll_next(&mut cx), Poll::Ready(None));
     }
 }

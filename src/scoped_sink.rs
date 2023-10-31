@@ -516,6 +516,8 @@ impl<'scope, 'env: 'scope, T> Stream for LocalSinkInner<'scope, 'env, T> {
 mod tests {
     use super::*;
 
+    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::Arc;
     use std::time::Duration;
 
     use anyhow::{bail, Error as AnyError, Result as AnyResult};
@@ -714,6 +716,40 @@ mod tests {
             for i in 10..20 {
                 println!("Sending: {i}");
                 sink.feed(i).await?;
+            }
+
+            println!("Closing");
+            sink.close().await?;
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_return_then_receive() -> AnyResult<()> {
+        let v = Arc::new(AtomicU8::new(0));
+        let mut sink: ScopedSink<usize, AnyError> = ScopedSink::new(move |mut src| {
+            let v = v.clone();
+            Box::pin(async move {
+                let mut v_ = v.load(Ordering::SeqCst);
+                v_ = if v_ == 8 {
+                    // Should never receive empty as any closure will be returned early.
+                    assert_eq!(src.next().await, Some(1));
+                    0
+                } else {
+                    v_ + 1
+                };
+                v.store(v_, Ordering::SeqCst);
+
+                Ok(())
+            })
+        });
+
+        test_helper(async move {
+            for _ in 0..10 {
+                println!("Sending");
+                sink.feed(1).await?;
             }
 
             println!("Closing");

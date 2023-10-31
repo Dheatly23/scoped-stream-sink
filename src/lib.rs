@@ -82,6 +82,126 @@
 //!     Ok(())
 //! }
 //! ```
+//!
+//! These following examples will fail to compile:
+//! ```compile_fail
+//! use anyhow::Error;
+//! use futures_sink::Sink;
+//! use futures_core::Stream;
+//! use futures_util::{SinkExt, StreamExt};
+//!
+//! use scoped_stream_sink::*;
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Error> {
+//!     // Create new sink
+//!     let mut sink = <ScopedSink<usize, Error>>::new(|mut stream| Box::pin(async move {
+//!         // Moving inner stream into another thread will fail
+//!         // because it might live for longer than the sink.
+//!         tokio::spawn(async move {
+//!             if let Some(v) = stream.next().await {
+//!                 println!("Value: {v}");
+//!             }
+//!         }).await?;
+//!
+//!         Ok(())
+//!     }));
+//!
+//!     for i in 0..10 {
+//!         sink.send(i).await?;
+//!     }
+//!     sink.close().await?;
+//!
+//!     Ok(())
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! use anyhow::Error;
+//! use futures_sink::Sink;
+//! use futures_core::Stream;
+//! use futures_util::{SinkExt, StreamExt};
+//!
+//! use scoped_stream_sink::*;
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Error> {
+//!     // Create new Stream
+//!     let mut stream = <ScopedTryStream<usize, Error>>::new(|mut sink| Box::pin(async move {
+//!         // Moving inner sink into another thread will fail
+//!         // because it might live for longer than the stream.
+//!         tokio::spawn(async move {
+//!             sink.send(1).await.unwrap();
+//!         }).await?;
+//!
+//!         Ok(())
+//!     }));
+//!
+//!     let mut v = Vec::new();
+//!     while let Some(i) = stream.next().await {
+//!         v.push(i?);
+//!     }
+//!     println!("{v:?}");
+//!
+//!     Ok(())
+//! }
+//! ```
+//!
+//! Some very hacky generator out of [`ScopedStream`]:
+//! ```
+//! use core::pin::pin;
+//! use core::ptr::NonNull;
+//! use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+//!
+//! use futures_sink::Sink;
+//! use futures_core::Stream;
+//! use futures_util::{SinkExt, StreamExt};
+//!
+//! use scoped_stream_sink::*;
+//!
+//! /// Create a null waker. It does nothing when waken.
+//! fn nil_waker() -> Waker {
+//!     fn raw() -> RawWaker {
+//!         RawWaker::new(NonNull::dangling().as_ptr(), &VTABLE)
+//!     }
+//!
+//!     unsafe fn clone(_: *const ()) -> RawWaker {
+//!         raw()
+//!     }
+//!     unsafe fn wake(_: *const ()) {}
+//!     unsafe fn wake_by_ref(_: *const ()) {}
+//!     unsafe fn drop(_: *const ()) {}
+//!
+//!     static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake_by_ref, drop);
+//!
+//!     unsafe { Waker::from_raw(raw()) }
+//! }
+//!
+//! fn main() {
+//!     // Create a generator
+//!     let mut stream = ScopedStream::new(|mut sink| Box::pin(async move {
+//!         for i in 0usize..10 {
+//!             sink.send(i).await.unwrap();
+//!         }
+//!     }));
+//!     let mut stream = pin!(stream);
+//!
+//!     // Setup waker and context
+//!     let waker = nil_waker();
+//!     let mut cx = Context::from_waker(&waker);
+//!
+//!     // The loop
+//!     loop {
+//!         let v = match stream.as_mut().poll_next(&mut cx) {
+//!             Poll::Pending => continue, // Should not happen, but continue anyways
+//!             Poll::Ready(None) => break, // Stop iteration
+//!             Poll::Ready(Some(v)) => v, // Process value
+//!         };
+//!
+//!         println!("{v}");
+//!     }
+//! }
+//! ```
 
 mod scoped_sink;
 mod scoped_stream;
