@@ -3,6 +3,8 @@ use core::marker::PhantomData;
 use core::pin::Pin;
 use core::task::{Context, Poll};
 
+#[cfg(feature = "either")]
+use either::{for_both, Either};
 use futures_core::Stream;
 use futures_sink::Sink;
 use pin_project_lite::pin_project;
@@ -258,6 +260,33 @@ where
     ) -> Poll<Result<Option<SendItem>, Self::Error>> {
         // SAFETY: Inner is pinned.
         unsafe { self.get_unchecked_mut().as_mut().poll_close(cx) }
+    }
+}
+
+#[cfg(feature = "either")]
+impl<L, R, SendItem, RecvItem, E> StreamSink<SendItem, RecvItem> for Either<L, R>
+where
+    L: StreamSink<SendItem, RecvItem, Error = E>,
+    R: StreamSink<SendItem, RecvItem, Error = E>,
+{
+    type Error = E;
+
+    fn poll_stream_sink(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> State<SendItem, Self::Error> {
+        for_both!(self.as_pin_mut(), v => v.poll_stream_sink(cx))
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: RecvItem) -> Result<(), Self::Error> {
+        for_both!(self.as_pin_mut(), v => v.start_send(item))
+    }
+
+    fn poll_close(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Option<SendItem>, Self::Error>> {
+        for_both!(self.as_pin_mut(), v => v.poll_close(cx))
     }
 }
 

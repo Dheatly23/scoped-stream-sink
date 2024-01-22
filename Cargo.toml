@@ -21,6 +21,11 @@ version = "0.3"
 default-features = false
 features = ["alloc"]
 
+[dependencies.either]
+version = "1.0"
+default-features = false
+optional = true
+
 [dev-dependencies]
 anyhow = "1"
 
@@ -43,4 +48,7 @@ default = ["std"]
 std = [
   "futures-core/std",
   "futures-sink/std",
+]
+either = [
+  "dep:either",
 ]
