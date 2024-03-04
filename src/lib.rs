@@ -1,12 +1,28 @@
 #![allow(clippy::type_complexity)]
 
-//! Make asynchronous [`Stream`](futures_core::Stream) and [`Sink`](futures_sink::Sink) easy.
+//! Make asynchronous [`Stream`] and [`Sink`] easy.
 //!
 //! This crate contains [`ScopedStream`] and [`ScopedSink`] type.
 //! They use normal Rust lifetime mechanism to ensure safety
 //! (eg. sending interior data outside of it's scope).
 //! Unlike [`async_stream`](https://docs.rs/async-stream/latest/async_stream/),
 //! it doesn't use macro.
+//!
+//! ## 📌 Plan for 2.0
+//!
+//! Since AFIT (and RPITIT) is stabilized, i plan to upgrade this library's interface to use them.
+//! This _should_ eliminate the [`Box::pin`] requirement, at the cost of complicated type bounds
+//! (and harder to use too, maybe).
+//! So far i've been unsuccessful to fully reason the type bounds.
+//!
+//! So here are the (rough) plan for (possible) 2.0:
+//! - Eliminate [`Box::pin`] requirement (maybe add type alias for dynamic version).
+//! - Beef up [`StreamSink`] functionality (right now it's kinda experimental).
+//!
+//! ## `no-std` Support
+//!
+//! Currently, this crate requires `alloc` (because of [`Box`] and such).
+//! But it's perfectly usable on platforms like WASM.
 //!
 //! # Examples
 //!
