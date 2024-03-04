@@ -30,8 +30,6 @@
 //! ```
 //! use std::time::Duration;
 //!
-//! use futures_sink::Sink;
-//! use futures_core::Stream;
 //! use futures_util::{SinkExt, StreamExt};
 //!
 //! use scoped_stream_sink::*;
@@ -68,8 +66,6 @@
 //! use std::time::Duration;
 //!
 //! use anyhow::Error;
-//! use futures_sink::Sink;
-//! use futures_core::Stream;
 //! use futures_util::{SinkExt, StreamExt};
 //!
 //! use scoped_stream_sink::*;
@@ -101,66 +97,35 @@
 //!
 //! These following examples will fail to compile:
 //! ```compile_fail
-//! use anyhow::Error;
-//! use futures_sink::Sink;
-//! use futures_core::Stream;
-//! use futures_util::{SinkExt, StreamExt};
-//!
-//! use scoped_stream_sink::*;
-//!
-//! #[tokio::main]
-//! async fn main() -> Result<(), Error> {
-//!     // Create new sink
-//!     let mut sink = <ScopedSink<usize, Error>>::new(|mut stream| Box::pin(async move {
-//!         // Moving inner stream into another thread will fail
-//!         // because it might live for longer than the sink.
-//!         tokio::spawn(async move {
-//!             if let Some(v) = stream.next().await {
-//!                 println!("Value: {v}");
-//!             }
-//!         }).await?;
-//!
-//!         Ok(())
-//!     }));
-//!
-//!     for i in 0..10 {
-//!         sink.send(i).await?;
-//!     }
-//!     sink.close().await?;
+//! # use anyhow::Error;
+//! # use futures_util::{SinkExt, StreamExt};
+//! # use scoped_stream_sink::*;
+//! let sink = <ScopedSink<usize, Error>>::new(|mut stream| Box::pin(async move {
+//!     // Moving inner stream into another thread will fail
+//!     // because it might live for longer than the sink.
+//!     tokio::spawn(async move {
+//!         if let Some(v) = stream.next().await {
+//!             println!("Value: {v}");
+//!         }
+//!     }).await?;
 //!
 //!     Ok(())
-//! }
+//! }));
 //! ```
 //!
 //! ```compile_fail
-//! use anyhow::Error;
-//! use futures_sink::Sink;
-//! use futures_core::Stream;
-//! use futures_util::{SinkExt, StreamExt};
-//!
-//! use scoped_stream_sink::*;
-//!
-//! #[tokio::main]
-//! async fn main() -> Result<(), Error> {
-//!     // Create new Stream
-//!     let mut stream = <ScopedTryStream<usize, Error>>::new(|mut sink| Box::pin(async move {
-//!         // Moving inner sink into another thread will fail
-//!         // because it might live for longer than the stream.
-//!         tokio::spawn(async move {
-//!             sink.send(1).await.unwrap();
-//!         }).await?;
-//!
-//!         Ok(())
-//!     }));
-//!
-//!     let mut v = Vec::new();
-//!     while let Some(i) = stream.next().await {
-//!         v.push(i?);
-//!     }
-//!     println!("{v:?}");
+//! # use anyhow::Error;
+//! # use futures_util::{SinkExt, StreamExt};
+//! # use scoped_stream_sink::*;
+//! let stream = <ScopedTryStream<usize, Error>>::new(|mut sink| Box::pin(async move {
+//!     // Moving inner sink into another thread will fail
+//!     // because it might live for longer than the stream.
+//!     tokio::spawn(async move {
+//!         sink.send(1).await.unwrap();
+//!     }).await?;
 //!
 //!     Ok(())
-//! }
+//! }));
 //! ```
 //!
 //! Some very hacky generator out of [`ScopedStream`]:
@@ -169,10 +134,7 @@
 //! use core::ptr::NonNull;
 //! use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 //!
-//! use futures_sink::Sink;
-//! use futures_core::Stream;
 //! use futures_util::{SinkExt, StreamExt};
-//!
 //! use scoped_stream_sink::*;
 //!
 //! /// Create a null waker. It does nothing when waken.
@@ -193,29 +155,27 @@
 //!     unsafe { Waker::from_raw(raw()) }
 //! }
 //!
-//! fn main() {
-//!     // Create a generator
-//!     let mut stream = ScopedStream::new(|mut sink| Box::pin(async move {
-//!         for i in 0usize..10 {
-//!             sink.send(i).await.unwrap();
-//!         }
-//!     }));
-//!     let mut stream = pin!(stream);
-//!
-//!     // Setup waker and context
-//!     let waker = nil_waker();
-//!     let mut cx = Context::from_waker(&waker);
-//!
-//!     // The loop
-//!     loop {
-//!         let v = match stream.as_mut().poll_next(&mut cx) {
-//!             Poll::Pending => continue, // Should not happen, but continue anyways
-//!             Poll::Ready(None) => break, // Stop iteration
-//!             Poll::Ready(Some(v)) => v, // Process value
-//!         };
-//!
-//!         println!("{v}");
+//! // Create a generator
+//! let mut stream = ScopedStream::new(|mut sink| Box::pin(async move {
+//!     for i in 0usize..10 {
+//!         sink.send(i).await.unwrap();
 //!     }
+//! }));
+//! let mut stream = pin!(stream);
+//!
+//! // Setup waker and context
+//! let waker = nil_waker();
+//! let mut cx = Context::from_waker(&waker);
+//!
+//! // The loop
+//! loop {
+//!     let v = match stream.as_mut().poll_next(&mut cx) {
+//!         Poll::Pending => continue, // Should not happen, but continue anyways
+//!         Poll::Ready(None) => break, // Stop iteration
+//!         Poll::Ready(Some(v)) => v, // Process value
+//!     };
+//!
+//!     println!("{v}");
 //! }
 //! ```
 
@@ -225,14 +185,15 @@ mod scoped_stream_sink;
 mod stream_sink;
 mod stream_sink_ext;
 
-#[cfg(feature = "std")]
-use core::mem::transmute;
-
-use std::ops::{Deref, DerefMut};
-#[cfg(feature = "std")]
-use std::sync::atomic::{AtomicU8, Ordering};
 #[cfg(all(feature = "std", debug_assertions))]
 use std::thread::{current, ThreadId};
+#[cfg(feature = "std")]
+use std::{
+    marker::PhantomData,
+    ops::{Deref, DerefMut},
+    ptr::NonNull,
+    sync::atomic::{AtomicU8, Ordering},
+};
 
 pub use crate::scoped_sink::*;
 pub use crate::scoped_stream::*;
@@ -247,8 +208,11 @@ pub(crate) mod sealed {
     pub(crate) trait Sealed {}
 }
 
+#[cfg(feature = "std")]
 const STATE_OFF: u8 = 0;
+#[cfg(feature = "std")]
 const STATE_ENTER: u8 = 1;
+#[cfg(feature = "std")]
 const STATE_LOCKED: u8 = 2;
 
 #[cfg(feature = "std")]
@@ -262,19 +226,24 @@ pub(crate) struct LocalThread<T> {
     inner: T,
 }
 
+#[cfg(feature = "std")]
 fn panic_expected(expect: u8, value: u8) {
     panic!("Inconsistent internal state! (expected lock state to be {:02X}, got {:02X})\nNote: Your code might use inner value across thread", expect, value);
 }
 
 #[cfg(feature = "std")]
-pub(crate) struct LocalThreadInnerGuard<'a, T>(&'a LocalThread<T>);
-#[cfg(feature = "std")]
-pub(crate) struct LocalThreadInnerCtxGuard<'a, T>(&'a LocalThread<T>);
+/// Guard for inner context.
+pub(crate) struct LocalThreadInnerGuard<'a, T> {
+    ptr: NonNull<LocalThread<T>>,
+    phantom: PhantomData<&'a LocalThread<T>>,
+}
 
 #[cfg(feature = "std")]
 impl<'a, T> Drop for LocalThreadInnerGuard<'a, T> {
     fn drop(&mut self) {
-        if let Err(v) = self.0.lock.compare_exchange(
+        // SAFETY: Pointer is valid.
+        let p = unsafe { self.ptr.as_ref() };
+        if let Err(v) = p.lock.compare_exchange(
             STATE_LOCKED,
             STATE_ENTER,
             Ordering::Release,
@@ -290,7 +259,8 @@ impl<'a, T> Deref for LocalThreadInnerGuard<'a, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &self.0.inner
+        // SAFETY: It is locked.
+        unsafe { &self.ptr.as_ref().inner }
     }
 }
 
@@ -298,22 +268,26 @@ impl<'a, T> Deref for LocalThreadInnerGuard<'a, T> {
 impl<'a, T> DerefMut for LocalThreadInnerGuard<'a, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: It is locked.
-        #[allow(mutable_transmutes)]
-        unsafe {
-            transmute(&self.0.inner)
-        }
+        unsafe { &mut self.ptr.as_mut().inner }
     }
+}
+
+#[cfg(feature = "std")]
+/// Guard for outer context.
+pub(crate) struct LocalThreadInnerCtxGuard<'a, T> {
+    ptr: NonNull<LocalThread<T>>,
+    phantom: PhantomData<&'a LocalThread<T>>,
 }
 
 #[cfg(feature = "std")]
 impl<'a, T> Drop for LocalThreadInnerCtxGuard<'a, T> {
     fn drop(&mut self) {
-        if let Err(v) = self.0.lock.compare_exchange(
-            STATE_ENTER,
-            STATE_OFF,
-            Ordering::Release,
-            Ordering::Relaxed,
-        ) {
+        // SAFETY: Pointer is valid.
+        let p = unsafe { self.ptr.as_ref() };
+        if let Err(v) =
+            p.lock
+                .compare_exchange(STATE_ENTER, STATE_OFF, Ordering::Release, Ordering::Relaxed)
+        {
             panic_expected(STATE_ENTER, v);
         }
     }
@@ -324,7 +298,8 @@ impl<'a, T> Deref for LocalThreadInnerCtxGuard<'a, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &self.0.inner
+        // SAFETY: It is locked.
+        unsafe { &self.ptr.as_ref().inner }
     }
 }
 
@@ -332,10 +307,7 @@ impl<'a, T> Deref for LocalThreadInnerCtxGuard<'a, T> {
 impl<'a, T> DerefMut for LocalThreadInnerCtxGuard<'a, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: It is locked.
-        #[allow(mutable_transmutes)]
-        unsafe {
-            transmute(&self.0.inner)
-        }
+        unsafe { &mut self.ptr.as_mut().inner }
     }
 }
 
@@ -351,7 +323,7 @@ impl<T> LocalThread<T> {
         }
     }
 
-    #[allow(clippy::mut_from_ref)]
+    /// Enters inner context.
     pub(crate) fn get_inner(&self) -> LocalThreadInnerGuard<'_, T> {
         if let Err(v) = self.lock.compare_exchange(
             STATE_ENTER,
@@ -367,10 +339,13 @@ impl<T> LocalThread<T> {
             panic!("Called from other thread!");
         }
 
-        LocalThreadInnerGuard(self)
+        LocalThreadInnerGuard {
+            ptr: self.into(),
+            phantom: PhantomData,
+        }
     }
 
-    #[allow(clippy::mut_from_ref)]
+    /// Enters outer context.
     pub(crate) fn set_inner_ctx(&mut self) -> LocalThreadInnerCtxGuard<'_, T> {
         if let Err(v) =
             self.lock
@@ -384,6 +359,9 @@ impl<T> LocalThread<T> {
             self.thread = current().id();
         }
 
-        LocalThreadInnerCtxGuard(&*self)
+        LocalThreadInnerCtxGuard {
+            ptr: self.into(),
+            phantom: PhantomData,
+        }
     }
 }

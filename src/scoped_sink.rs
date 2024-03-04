@@ -13,15 +13,14 @@ use pin_project_lite::pin_project;
 use crate::LocalThread;
 
 #[cfg(feature = "std")]
-/// Erased type for the scope function. It accepts a [`SinkInner`] reference
-/// that implements [`Stream`].
+/// Erased type for the scope function.
+///
+/// It accepts a [`SinkInner`] reference and returns a future, capturing it's parameter.
 ///
 /// # Examples
 ///
 /// ```
-/// // Helper methods for stream
-/// use futures_util::StreamExt;
-///
+/// # use futures_util::StreamExt;
 /// let func: scoped_stream_sink::DynSinkFn<usize, ()> = Box::new(|mut stream| Box::pin(async move {
 ///     while let Some(v) = stream.next().await {
 ///         println!("Value: {v}");
@@ -41,7 +40,10 @@ pub type DynSinkFuture<'scope, E> = Pin<Box<dyn Future<Output = Result<(), E>> +
 
 #[cfg(feature = "std")]
 pin_project! {
-    /// Sink with a scoped future. It is useful to simply creates stateful sinks.
+    /// Sink with a scoped future.
+    ///
+    /// It is useful to easily create [`Sink`] type, without
+    /// hassle of manually constructing one.
     /// Safety is guaranteed by the inner reference cannot be moved outside the future,
     /// similiar to [`scope`](std::thread::scope).
     #[must_use = "Sink will not do anything if not used"]
@@ -60,7 +62,9 @@ struct SinkInnerData<T> {
 
 #[cfg(feature = "std")]
 pin_project! {
-    /// Inner type for [`ScopedSink`]. `'scope` defines the lifetime of it's scope,
+    /// Inner type for [`ScopedSink`].
+    ///
+    /// `'scope` defines the lifetime of it's scope,
     /// and `'env` defines the lifetime of it's environment. Lifetimes are constrained
     /// such that the reference cannot be sent outside it's scope.
     ///
@@ -92,8 +96,9 @@ impl<'env, T: 'env, E: 'env> ScopedSink<'env, T, E> {
     /// # Examples
     ///
     /// ```
-    /// use scoped_stream_sink::ScopedSink;
-    /// let mut sink: ScopedSink<usize, ()> = ScopedSink::new_dyn(Box::new(|_| {
+    /// # use anyhow::Error;
+    /// # use scoped_stream_sink::ScopedSink;
+    /// let mut sink: ScopedSink<usize, Error> = ScopedSink::new_dyn(Box::new(|_| {
     ///     Box::pin(async { Ok(()) })
     /// }));
     /// ```
@@ -123,30 +128,25 @@ impl<'env, T: 'env, E: 'env> ScopedSink<'env, T, E> {
     /// # Examples
     ///
     /// ```
-    /// use anyhow::Error;
-    /// // Helper methods for stream
-    /// use futures_util::{SinkExt, StreamExt};
-    ///
-    /// use scoped_stream_sink::ScopedSink;
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), Error> {
-    ///     let mut sink = <ScopedSink<_, Error>>::new(|mut stream| Box::pin(async move {
-    ///         // Reads a value. If future returns before sink is closed, it will be restarted.
-    ///         if let Some(v) = stream.next().await {
-    ///             println!("Value: {v}");
-    ///         }
-    ///         Ok(())
-    ///     }));
-    ///
-    ///     // Send a value
-    ///     sink.send(1).await?;
-    ///
-    ///     // Close the sink
-    ///     sink.close().await?;
-    ///
+    /// # use anyhow::Error;
+    /// # use futures_util::{SinkExt, StreamExt};
+    /// # use scoped_stream_sink::ScopedSink;
+    /// # fn main() -> Result<(), Error> {
+    /// # tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
+    /// let mut sink = <ScopedSink<_, Error>>::new(|mut stream| Box::pin(async move {
+    ///     // Reads a value. If future returns before sink is closed, it will be restarted.
+    ///     if let Some(v) = stream.next().await {
+    ///         println!("Value: {v}");
+    ///     }
     ///     Ok(())
-    /// }
+    /// }));
+    ///
+    /// // Send a value
+    /// sink.send(1).await?;
+    ///
+    /// // Close the sink
+    /// sink.close().await?;
+    /// # Ok(()) })}
     /// ```
     pub fn new<F>(f: F) -> Self
     where
@@ -335,15 +335,14 @@ impl<'scope, 'env: 'scope, T> Stream for SinkInner<'scope, 'env, T> {
     }
 }
 
-/// Erased type for the local scope function. It accepts a [`LocalSinkInner`] reference
-/// that implements [`Stream`].
+/// Erased type for the local scope function.
+///
+/// It accepts a [`LocalSinkInner`] reference and returns a future, capturing it's parameter.
 ///
 /// # Examples
 ///
 /// ```
-/// // Helper methods for stream
-/// use futures_util::StreamExt;
-///
+/// # use futures_util::StreamExt;
 /// let func: scoped_stream_sink::DynLocalSinkFn<usize, ()> = Box::new(|mut stream| Box::pin(async move {
 ///     while let Some(v) = stream.next().await {
 ///         println!("Value: {v}");
@@ -362,8 +361,9 @@ pub type DynLocalSinkFn<'env, T, E> = Box<
 pub type DynLocalSinkFuture<'scope, E> = Pin<Box<dyn Future<Output = Result<(), E>> + 'scope>>;
 
 pin_project! {
-    /// Sink with a scoped future. Unlike [`ScopedSink`] it is not [`Send`],
-    /// so it can work in no-std environment.
+    /// Local sink with a scoped future.
+    ///
+    /// Unlike [`ScopedSink`] it is not [`Send`], so it can work in no-std environment.
     #[must_use = "Sink will not do anything if not used"]
     pub struct LocalScopedSink<'env, T, E> {
         f: DynLocalSinkFn<'env, T, E>,
@@ -374,7 +374,9 @@ pin_project! {
 }
 
 pin_project! {
-    /// Inner type for [`LocalScopedSink`]. Similiar to [`SinkInner`], but not [`Send`].
+    /// Inner type for [`LocalScopedSink`].
+    ///
+    /// Similiar to [`SinkInner`], but not [`Send`].
     pub struct LocalSinkInner<'scope, 'env: 'scope, T> {
         inner: SinkInnerData<T>,
 
@@ -392,8 +394,9 @@ impl<'env, T: 'env, E: 'env> LocalScopedSink<'env, T, E> {
     /// # Examples
     ///
     /// ```
-    /// use scoped_stream_sink::LocalScopedSink;
-    /// let mut sink: LocalScopedSink<usize, ()> = LocalScopedSink::new_dyn(Box::new(|_| {
+    /// # use anyhow::Error;
+    /// # use scoped_stream_sink::LocalScopedSink;
+    /// let mut sink: LocalScopedSink<usize, Error> = LocalScopedSink::new_dyn(Box::new(|_| {
     ///     Box::pin(async { Ok(()) })
     /// }));
     /// ```
@@ -423,30 +426,25 @@ impl<'env, T: 'env, E: 'env> LocalScopedSink<'env, T, E> {
     /// # Examples
     ///
     /// ```
-    /// use anyhow::Error;
-    /// // Helper methods for stream
-    /// use futures_util::{SinkExt, StreamExt};
-    ///
-    /// use scoped_stream_sink::LocalScopedSink;
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), Error> {
-    ///     let mut sink = <LocalScopedSink<_, Error>>::new(|mut stream| Box::pin(async move {
-    ///         // Reads a value. If future returns before sink is closed, it will be restarted.
-    ///         if let Some(v) = stream.next().await {
-    ///             println!("Value: {v}");
-    ///         }
-    ///         Ok(())
-    ///     }));
-    ///
-    ///     // Send a value
-    ///     sink.send(1).await?;
-    ///
-    ///     // Close the sink
-    ///     sink.close().await?;
-    ///
+    /// # use anyhow::Error;
+    /// # use futures_util::{SinkExt, StreamExt};
+    /// # use scoped_stream_sink::LocalScopedSink;
+    /// # fn main() -> Result<(), Error> {
+    /// # tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
+    /// let mut sink = <LocalScopedSink<_, Error>>::new(|mut stream| Box::pin(async move {
+    ///     // Reads a value. If future returns before sink is closed, it will be restarted.
+    ///     if let Some(v) = stream.next().await {
+    ///         println!("Value: {v}");
+    ///     }
     ///     Ok(())
-    /// }
+    /// }));
+    ///
+    /// // Send a value
+    /// sink.send(1).await?;
+    ///
+    /// // Close the sink
+    /// sink.close().await?;
+    /// # Ok(()) })}
     /// ```
     pub fn new<F>(f: F) -> Self
     where
