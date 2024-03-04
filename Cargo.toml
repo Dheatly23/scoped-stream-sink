@@ -22,8 +22,9 @@ default-features = false
 [dev-dependencies]
 anyhow = "1"
 
-[dev-dependencies.futures-util]
+[dependencies.futures-util]
 version = "0.3"
+optional = true
 features = [
   "sink",
 ]
@@ -39,6 +40,7 @@ features = [
 [features]
 default = ["std"]
 std = [
+  "dep:futures-util",
   "futures-core/std",
   "futures-sink/std",
 ]

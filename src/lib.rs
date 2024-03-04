@@ -208,6 +208,21 @@ pub(crate) mod sealed {
     pub(crate) trait Sealed {}
 }
 
+pub mod prelude {
+    pub use crate::{
+        LocalScopedSink, LocalScopedStream, LocalScopedStreamSink, LocalScopedTryStream,
+        StreamSink as _, StreamSinkExt as _,
+    };
+
+    pub use futures_core::Stream as _;
+    pub use futures_sink::Sink as _;
+
+    #[cfg(feature = "std")]
+    pub use crate::{ScopedSink, ScopedStream, ScopedStreamSink, ScopedTryStream};
+    #[cfg(feature = "std")]
+    pub use futures_util::{SinkExt as _, StreamExt as _};
+}
+
 #[cfg(feature = "std")]
 const STATE_OFF: u8 = 0;
 #[cfg(feature = "std")]
