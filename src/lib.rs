@@ -225,14 +225,15 @@ mod scoped_stream_sink;
 mod stream_sink;
 mod stream_sink_ext;
 
-#[cfg(feature = "std")]
-use core::mem::transmute;
-
-use std::ops::{Deref, DerefMut};
-#[cfg(feature = "std")]
-use std::sync::atomic::{AtomicU8, Ordering};
 #[cfg(all(feature = "std", debug_assertions))]
 use std::thread::{current, ThreadId};
+#[cfg(feature = "std")]
+use std::{
+    marker::PhantomData,
+    ops::{Deref, DerefMut},
+    ptr::NonNull,
+    sync::atomic::{AtomicU8, Ordering},
+};
 
 pub use crate::scoped_sink::*;
 pub use crate::scoped_stream::*;
@@ -247,8 +248,11 @@ pub(crate) mod sealed {
     pub(crate) trait Sealed {}
 }
 
+#[cfg(feature = "std")]
 const STATE_OFF: u8 = 0;
+#[cfg(feature = "std")]
 const STATE_ENTER: u8 = 1;
+#[cfg(feature = "std")]
 const STATE_LOCKED: u8 = 2;
 
 #[cfg(feature = "std")]
@@ -262,19 +266,24 @@ pub(crate) struct LocalThread<T> {
     inner: T,
 }
 
+#[cfg(feature = "std")]
 fn panic_expected(expect: u8, value: u8) {
     panic!("Inconsistent internal state! (expected lock state to be {:02X}, got {:02X})\nNote: Your code might use inner value across thread", expect, value);
 }
 
 #[cfg(feature = "std")]
-pub(crate) struct LocalThreadInnerGuard<'a, T>(&'a LocalThread<T>);
-#[cfg(feature = "std")]
-pub(crate) struct LocalThreadInnerCtxGuard<'a, T>(&'a LocalThread<T>);
+/// Guard for inner context.
+pub(crate) struct LocalThreadInnerGuard<'a, T> {
+    ptr: NonNull<LocalThread<T>>,
+    phantom: PhantomData<&'a LocalThread<T>>,
+}
 
 #[cfg(feature = "std")]
 impl<'a, T> Drop for LocalThreadInnerGuard<'a, T> {
     fn drop(&mut self) {
-        if let Err(v) = self.0.lock.compare_exchange(
+        // SAFETY: Pointer is valid.
+        let p = unsafe { self.ptr.as_ref() };
+        if let Err(v) = p.lock.compare_exchange(
             STATE_LOCKED,
             STATE_ENTER,
             Ordering::Release,
@@ -290,7 +299,8 @@ impl<'a, T> Deref for LocalThreadInnerGuard<'a, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &self.0.inner
+        // SAFETY: It is locked.
+        unsafe { &self.ptr.as_ref().inner }
     }
 }
 
@@ -298,22 +308,26 @@ impl<'a, T> Deref for LocalThreadInnerGuard<'a, T> {
 impl<'a, T> DerefMut for LocalThreadInnerGuard<'a, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: It is locked.
-        #[allow(mutable_transmutes)]
-        unsafe {
-            transmute(&self.0.inner)
-        }
+        unsafe { &mut self.ptr.as_mut().inner }
     }
+}
+
+#[cfg(feature = "std")]
+/// Guard for outer context.
+pub(crate) struct LocalThreadInnerCtxGuard<'a, T> {
+    ptr: NonNull<LocalThread<T>>,
+    phantom: PhantomData<&'a LocalThread<T>>,
 }
 
 #[cfg(feature = "std")]
 impl<'a, T> Drop for LocalThreadInnerCtxGuard<'a, T> {
     fn drop(&mut self) {
-        if let Err(v) = self.0.lock.compare_exchange(
-            STATE_ENTER,
-            STATE_OFF,
-            Ordering::Release,
-            Ordering::Relaxed,
-        ) {
+        // SAFETY: Pointer is valid.
+        let p = unsafe { self.ptr.as_ref() };
+        if let Err(v) =
+            p.lock
+                .compare_exchange(STATE_ENTER, STATE_OFF, Ordering::Release, Ordering::Relaxed)
+        {
             panic_expected(STATE_ENTER, v);
         }
     }
@@ -324,7 +338,8 @@ impl<'a, T> Deref for LocalThreadInnerCtxGuard<'a, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &self.0.inner
+        // SAFETY: It is locked.
+        unsafe { &self.ptr.as_ref().inner }
     }
 }
 
@@ -332,10 +347,7 @@ impl<'a, T> Deref for LocalThreadInnerCtxGuard<'a, T> {
 impl<'a, T> DerefMut for LocalThreadInnerCtxGuard<'a, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: It is locked.
-        #[allow(mutable_transmutes)]
-        unsafe {
-            transmute(&self.0.inner)
-        }
+        unsafe { &mut self.ptr.as_mut().inner }
     }
 }
 
@@ -351,7 +363,7 @@ impl<T> LocalThread<T> {
         }
     }
 
-    #[allow(clippy::mut_from_ref)]
+    /// Enters inner context.
     pub(crate) fn get_inner(&self) -> LocalThreadInnerGuard<'_, T> {
         if let Err(v) = self.lock.compare_exchange(
             STATE_ENTER,
@@ -367,10 +379,13 @@ impl<T> LocalThread<T> {
             panic!("Called from other thread!");
         }
 
-        LocalThreadInnerGuard(self)
+        LocalThreadInnerGuard {
+            ptr: self.into(),
+            phantom: PhantomData,
+        }
     }
 
-    #[allow(clippy::mut_from_ref)]
+    /// Enters outer context.
     pub(crate) fn set_inner_ctx(&mut self) -> LocalThreadInnerCtxGuard<'_, T> {
         if let Err(v) =
             self.lock
@@ -384,6 +399,9 @@ impl<T> LocalThread<T> {
             self.thread = current().id();
         }
 
-        LocalThreadInnerCtxGuard(&*self)
+        LocalThreadInnerCtxGuard {
+            ptr: self.into(),
+            phantom: PhantomData,
+        }
     }
 }
