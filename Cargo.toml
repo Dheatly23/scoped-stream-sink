@@ -14,12 +14,10 @@ pin-project-lite = "0.2"
 [dependencies.futures-core]
 version = "0.3"
 default-features = false
-features = ["alloc"]
 
 [dependencies.futures-sink]
 version = "0.3"
 default-features = false
-features = ["alloc"]
 
 [dependencies.either]
 version = "1.0"
@@ -29,8 +27,9 @@ optional = true
 [dev-dependencies]
 anyhow = "1"
 
-[dev-dependencies.futures-util]
+[dependencies.futures-util]
 version = "0.3"
+optional = true
 features = [
   "sink",
 ]
@@ -46,6 +45,7 @@ features = [
 [features]
 default = ["std"]
 std = [
+  "dep:futures-util",
   "futures-core/std",
   "futures-sink/std",
 ]

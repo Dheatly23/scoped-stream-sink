@@ -20,7 +20,9 @@ type DynTryStreamFut<'scope, E> = Pin<Box<dyn Future<Output = Result<(), E>> + S
 
 #[cfg(feature = "std")]
 pin_project! {
-    /// Stream with a scoped future. It is useful to easily create [`Stream`] type, without
+    /// Stream with a scoped future.
+    ///
+    /// It is useful to easily create [`Stream`] type, without
     /// hassle of manually constructing one or using macros
     /// (like [`async_stream`](https://docs.rs/async-stream/latest/async_stream/)).
     /// Safety is guaranteed by carefully scoping [`StreamInner`],
@@ -34,7 +36,9 @@ pin_project! {
 
 #[cfg(feature = "std")]
 pin_project! {
-    /// Similiar to [`ScopedStream`], but allows for an error type. Future inside may be fallible,
+    /// Fallible stream with a scoped future.
+    ///
+    /// Similiar to [`ScopedStream`], but allows for an error type. Future inside may fail,
     /// unlike [`ScopedStream`]. Also, the inner [`TryStreamInner`] allows for either sending
     /// an item or [`Result`] type.
     pub struct ScopedTryStream<'env, T, E> {
@@ -51,7 +55,9 @@ struct StreamInnerData<T> {
 
 #[cfg(feature = "std")]
 pin_project! {
-    /// Inner type of [`ScopedStream`]. Implements [`Sink`] to send data for the stream.
+    /// Inner type of [`ScopedStream`].
+    ///
+    /// Implements [`Sink`] to send data for the stream.
     ///
     /// # Note About Thread-safety
     ///
@@ -74,7 +80,10 @@ pin_project! {
 
 #[cfg(feature = "std")]
 pin_project! {
-    /// Inner type of [`ScopedTryStream`]. Implements [`Sink`] for both item type or [`Result`].
+    /// Inner type of [`ScopedTryStream`].
+    ///
+    /// Implements [`Sink`] for both item type and a [`Result`],
+    /// allowing to send error (if you so choose).
     ///
     /// # Note About Thread-safety
     ///
@@ -104,27 +113,25 @@ impl<'env, T> ScopedStream<'env, T> {
     /// # Examples
     ///
     /// ```
-    /// // Helper methods for stream
-    /// use futures_util::{SinkExt, StreamExt};
+    /// # use anyhow::Error;
+    /// # use futures_util::{SinkExt, StreamExt};
+    /// # use scoped_stream_sink::ScopedStream;
+    /// # fn main() -> Result<(), Error> {
+    /// # tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
+    /// let mut stream = <ScopedStream<usize>>::new(|mut sink| Box::pin(async move {
+    ///     // Send a value.
+    ///     // It is okay to unwrap() because it is infallible.
+    ///     sink.send(1).await.unwrap();
     ///
-    /// use scoped_stream_sink::ScopedStream;
+    ///     // (Optional) close the sink. NOTE: sink cannot be used afterwards.
+    ///     // sink.close().await.unwrap();
+    /// }));
     ///
-    /// #[tokio::main]
-    /// async fn main() {
-    ///     let mut stream = <ScopedStream<usize>>::new(|mut sink| Box::pin(async move {
-    ///         // Send a value.
-    ///         // It is okay to unwrap() because it is infallible.
-    ///         sink.send(1).await.unwrap();
-    ///
-    ///         // (Optional) close the sink. NOTE: sink cannot be used afterwards.
-    ///         // sink.close().await.unwrap();
-    ///     }));
-    ///
-    ///     // Receive all values
-    ///     while let Some(i) = stream.next().await {
-    ///         println!("{i}");
-    ///     }
+    /// // Receive all values
+    /// while let Some(i) = stream.next().await {
+    ///     println!("{i}");
     /// }
+    /// # Ok(()) })}
     /// ```
     pub fn new<F>(f: F) -> Self
     where
@@ -161,31 +168,27 @@ impl<'env, T, E> ScopedTryStream<'env, T, E> {
     /// # Examples
     ///
     /// ```
-    /// use anyhow::Error;
-    /// // Helper methods for stream
-    /// use futures_util::{SinkExt, StreamExt};
+    /// # use anyhow::Error;
+    /// # use futures_util::{SinkExt, StreamExt};
+    /// # use scoped_stream_sink::ScopedTryStream;
+    /// # fn main() -> Result<(), Error> {
+    /// # tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
+    /// let mut stream = <ScopedTryStream<_, Error>>::new(|mut sink| Box::pin(async move {
+    ///     // Send a value.
+    ///     sink.send(1).await?;
     ///
-    /// use scoped_stream_sink::ScopedTryStream;
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), Error> {
-    ///     let mut stream = <ScopedTryStream<_, Error>>::new(|mut sink| Box::pin(async move {
-    ///         // Send a value.
-    ///         sink.send(1).await?;
-    ///
-    ///         // (Optional) close the sink. NOTE: sink cannot be used afterwards.
-    ///         // sink.close().await.unwrap();
-    ///
-    ///         Ok(())
-    ///     }));
-    ///
-    ///     // Receive all values
-    ///     while let Some(i) = stream.next().await.transpose()? {
-    ///         println!("{i}");
-    ///     }
+    ///     // (Optional) close the sink. NOTE: sink cannot be used afterwards.
+    ///     // sink.close().await.unwrap();
     ///
     ///     Ok(())
+    /// }));
+    ///
+    /// // Receive all values
+    /// while let Some(i) = stream.next().await.transpose()? {
+    ///     println!("{i}");
     /// }
+    ///
+    /// # Ok(()) })}
     /// ```
     pub fn new<F>(f: F) -> Self
     where
@@ -394,8 +397,9 @@ type DynLocalStreamFut<'scope> = Pin<Box<dyn Future<Output = ()> + 'scope>>;
 type DynLocalTryStreamFut<'scope, E> = Pin<Box<dyn Future<Output = Result<(), E>> + 'scope>>;
 
 pin_project! {
-    /// Stream with a scoped future. Unlike [`ScopedStream`] it is not [`Send`],
-    /// so it can work in no-std environment.
+    /// Local stream with a scoped future.
+    ///
+    /// Unlike [`ScopedStream`] it is not [`Send`], so it can work in no-std environment.
     pub struct LocalScopedStream<'env, T> {
         fut: Option<DynLocalStreamFut<'env>>,
 
@@ -404,7 +408,9 @@ pin_project! {
 }
 
 pin_project! {
-    /// [`ScopedTryStream`] equivalent, but not [`Send`],
+    /// Local stream with a scoped future.
+    ///
+    /// Unlike [`ScopedTryStream`] it is not [`Send`], so it can work in no-std environment.
     pub struct LocalScopedTryStream<'env, T, E> {
         fut: Option<DynLocalTryStreamFut<'env, E>>,
 
@@ -413,7 +419,9 @@ pin_project! {
 }
 
 pin_project! {
-    /// Inner type of [`ScopedStream`]. Similiar to [`StreamInner`] but not [`Send`].
+    /// Inner type of [`LocalScopedStream`].
+    ///
+    /// Similiar to [`StreamInner`], but not [`Send`].
     pub struct LocalStreamInner<'scope, 'env: 'scope, T> {
         inner: StreamInnerData<T>,
 
@@ -424,7 +432,9 @@ pin_project! {
 }
 
 pin_project! {
-    /// Inner type of [`ScopedTryStream`]. Similiar to [`TryStreamInner`] but not [`Send`].
+    /// Inner type of [`LocalScopedTryStream`].
+    ///
+    /// Similiar to [`TryStreamInner`], but not [`Send`].
     pub struct LocalTryStreamInner<'scope, 'env: 'scope, T, E> {
         inner: StreamInnerData<Result<T, E>>,
 
@@ -442,27 +452,25 @@ impl<'env, T> LocalScopedStream<'env, T> {
     /// # Examples
     ///
     /// ```
-    /// // Helper methods for stream
-    /// use futures_util::{SinkExt, StreamExt};
+    /// # use anyhow::Error;
+    /// # use futures_util::{SinkExt, StreamExt};
+    /// # use scoped_stream_sink::LocalScopedStream;
+    /// # fn main() -> Result<(), Error> {
+    /// # tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
+    /// let mut stream = <LocalScopedStream<usize>>::new(|mut sink| Box::pin(async move {
+    ///     // Send a value.
+    ///     // It is okay to unwrap() because it is infallible.
+    ///     sink.send(1).await.unwrap();
     ///
-    /// use scoped_stream_sink::LocalScopedStream;
+    ///     // (Optional) close the sink. NOTE: sink cannot be used afterwards.
+    ///     // sink.close().await.unwrap();
+    /// }));
     ///
-    /// #[tokio::main]
-    /// async fn main() {
-    ///     let mut stream = <LocalScopedStream<usize>>::new(|mut sink| Box::pin(async move {
-    ///         // Send a value.
-    ///         // It is okay to unwrap() because it is infallible.
-    ///         sink.send(1).await.unwrap();
-    ///
-    ///         // (Optional) close the sink. NOTE: sink cannot be used afterwards.
-    ///         // sink.close().await.unwrap();
-    ///     }));
-    ///
-    ///     // Receive all values
-    ///     while let Some(i) = stream.next().await {
-    ///         println!("{i}");
-    ///     }
+    /// // Receive all values
+    /// while let Some(i) = stream.next().await {
+    ///     println!("{i}");
     /// }
+    /// # Ok(()) })}
     /// ```
     pub fn new<F>(f: F) -> Self
     where
@@ -498,31 +506,27 @@ impl<'env, T, E> LocalScopedTryStream<'env, T, E> {
     /// # Examples
     ///
     /// ```
-    /// use anyhow::Error;
-    /// // Helper methods for stream
-    /// use futures_util::{SinkExt, StreamExt};
+    /// # use anyhow::Error;
+    /// # use futures_util::{SinkExt, StreamExt};
+    /// # use scoped_stream_sink::LocalScopedTryStream;
+    /// # fn main() -> Result<(), Error> {
+    /// # tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
+    /// let mut stream = <LocalScopedTryStream<_, Error>>::new(|mut sink| Box::pin(async move {
+    ///     // Send a value.
+    ///     sink.send(1).await?;
     ///
-    /// use scoped_stream_sink::LocalScopedTryStream;
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), Error> {
-    ///     let mut stream = <LocalScopedTryStream<_, Error>>::new(|mut sink| Box::pin(async move {
-    ///         // Send a value.
-    ///         sink.send(1).await?;
-    ///
-    ///         // (Optional) close the sink. NOTE: sink cannot be used afterwards.
-    ///         // sink.close().await.unwrap();
-    ///
-    ///         Ok(())
-    ///     }));
-    ///
-    ///     // Receive all values
-    ///     while let Some(i) = stream.next().await.transpose()? {
-    ///         println!("{i}");
-    ///     }
+    ///     // (Optional) close the sink. NOTE: sink cannot be used afterwards.
+    ///     // sink.close().await.unwrap();
     ///
     ///     Ok(())
+    /// }));
+    ///
+    /// // Receive all values
+    /// while let Some(i) = stream.next().await.transpose()? {
+    ///     println!("{i}");
     /// }
+    ///
+    /// # Ok(()) })}
     /// ```
     pub fn new<F>(f: F) -> Self
     where
