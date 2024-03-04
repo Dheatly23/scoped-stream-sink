@@ -14,12 +14,10 @@ pin-project-lite = "0.2"
 [dependencies.futures-core]
 version = "0.3"
 default-features = false
-features = ["alloc"]
 
 [dependencies.futures-sink]
 version = "0.3"
 default-features = false
-features = ["alloc"]
 
 [dev-dependencies]
 anyhow = "1"
