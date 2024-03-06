@@ -51,7 +51,8 @@ pin_project! {
         f: DynSinkFn<'env, T, E>,
         inner: Option<DynSinkFuture<'env, E>>,
 
-        data: Pin<Box<SinkInner<'env, 'env, T>>>,
+        #[pin]
+        data: SinkInner<'env, 'env, T>,
     }
 }
 
@@ -104,7 +105,7 @@ impl<'env, T: 'env, E: 'env> ScopedSink<'env, T, E> {
     /// ```
     pub fn new_dyn(f: DynSinkFn<'env, T, E>) -> Self {
         Self {
-            data: Box::pin(SinkInner {
+            data: SinkInner {
                 inner: LocalThread::new(SinkInnerData {
                     data: None,
                     closed: false,
@@ -112,7 +113,7 @@ impl<'env, T: 'env, E: 'env> ScopedSink<'env, T, E> {
 
                 pinned: PhantomPinned,
                 phantom: PhantomData,
-            }),
+            },
 
             f,
             inner: None,
@@ -128,18 +129,19 @@ impl<'env, T: 'env, E: 'env> ScopedSink<'env, T, E> {
     /// # Examples
     ///
     /// ```
+    /// # use std::pin::pin;
     /// # use anyhow::Error;
     /// # use futures_util::{SinkExt, StreamExt};
     /// # use scoped_stream_sink::ScopedSink;
     /// # fn main() -> Result<(), Error> {
     /// # tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
-    /// let mut sink = <ScopedSink<_, Error>>::new(|mut stream| Box::pin(async move {
+    /// let mut sink = pin!(<ScopedSink<_, Error>>::new(|mut stream| Box::pin(async move {
     ///     // Reads a value. If future returns before sink is closed, it will be restarted.
     ///     if let Some(v) = stream.next().await {
     ///         println!("Value: {v}");
     ///     }
     ///     Ok(())
-    /// }));
+    /// })));
     ///
     /// // Send a value
     /// sink.send(1).await?;
@@ -276,7 +278,7 @@ impl<'env, T: 'env, E: 'env> ScopedSink<'env, T, E> {
         &mut Option<DynSinkFuture<'env, E>>,
         impl FnMut() -> DynSinkFuture<'env, E> + '_,
     ) {
-        let this = self.project();
+        let mut this = self.project();
         // SAFETY: We constrained data lifetime to be 'scope.
         // Since 'scope is contained within self, it is safe to extend it.
         let f = unsafe {
@@ -286,11 +288,7 @@ impl<'env, T: 'env, E: 'env> ScopedSink<'env, T, E> {
             )
         };
 
-        (
-            this.data.as_mut().project().inner.set_inner_ctx(),
-            this.inner,
-            f,
-        )
+        (this.data.project().inner.set_inner_ctx(), this.inner, f)
     }
 }
 
@@ -369,7 +367,8 @@ pin_project! {
         f: DynLocalSinkFn<'env, T, E>,
         inner: Option<DynLocalSinkFuture<'env, E>>,
 
-        data: Pin<Box<LocalSinkInner<'env, 'env, T>>>,
+        #[pin]
+        data: LocalSinkInner<'env, 'env, T>,
     }
 }
 
@@ -402,7 +401,7 @@ impl<'env, T: 'env, E: 'env> LocalScopedSink<'env, T, E> {
     /// ```
     pub fn new_dyn(f: DynLocalSinkFn<'env, T, E>) -> Self {
         Self {
-            data: Box::pin(LocalSinkInner {
+            data: LocalSinkInner {
                 inner: SinkInnerData {
                     data: None,
                     closed: false,
@@ -410,7 +409,7 @@ impl<'env, T: 'env, E: 'env> LocalScopedSink<'env, T, E> {
 
                 pinned: PhantomPinned,
                 phantom: PhantomData,
-            }),
+            },
 
             f,
             inner: None,
@@ -426,18 +425,19 @@ impl<'env, T: 'env, E: 'env> LocalScopedSink<'env, T, E> {
     /// # Examples
     ///
     /// ```
+    /// # use std::pin::pin;
     /// # use anyhow::Error;
     /// # use futures_util::{SinkExt, StreamExt};
     /// # use scoped_stream_sink::LocalScopedSink;
     /// # fn main() -> Result<(), Error> {
     /// # tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
-    /// let mut sink = <LocalScopedSink<_, Error>>::new(|mut stream| Box::pin(async move {
+    /// let mut sink = pin!(<LocalScopedSink<_, Error>>::new(|mut stream| Box::pin(async move {
     ///     // Reads a value. If future returns before sink is closed, it will be restarted.
     ///     if let Some(v) = stream.next().await {
     ///         println!("Value: {v}");
     ///     }
     ///     Ok(())
-    /// }));
+    /// })));
     ///
     /// // Send a value
     /// sink.send(1).await?;
@@ -463,7 +463,7 @@ impl<'env, T: 'env, E: 'env> LocalScopedSink<'env, T, E> {
         &mut Option<DynLocalSinkFuture<'env, E>>,
         impl FnMut() -> DynLocalSinkFuture<'env, E> + '_,
     ) {
-        let this = self.project();
+        let mut this = self.project();
         // SAFETY: We constrained data lifetime to be 'scope.
         // Since 'scope is contained within self, it is safe to extend it.
         let f = unsafe {
@@ -473,7 +473,7 @@ impl<'env, T: 'env, E: 'env> LocalScopedSink<'env, T, E> {
             )
         };
 
-        (this.data.as_mut().project().inner, this.inner, f)
+        (this.data.project().inner, this.inner, f)
     }
 }
 
@@ -514,6 +514,7 @@ impl<'scope, 'env: 'scope, T> Stream for LocalSinkInner<'scope, 'env, T> {
 mod tests {
     use super::*;
 
+    use std::pin::pin;
     use std::sync::atomic::{AtomicU8, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
@@ -548,6 +549,7 @@ mod tests {
             })));
 
         test_helper(async move {
+            let mut sink = pin!(sink);
             sink.send(1).await?;
             drop(sink);
 
@@ -558,9 +560,11 @@ mod tests {
     */
     #[tokio::test]
     async fn test_simple() -> AnyResult<()> {
-        let mut sink: ScopedSink<usize, AnyError> = ScopedSink::new(|_| Box::pin(async { Ok(()) }));
+        let sink = <ScopedSink<usize, AnyError>>::new(|_| Box::pin(async { Ok(()) }));
 
         test_helper(async move {
+            let mut sink = pin!(sink);
+
             println!("Closing");
             sink.close().await?;
 
@@ -571,7 +575,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_one() -> AnyResult<()> {
-        let mut sink: ScopedSink<usize, AnyError> = ScopedSink::new(|mut src| {
+        let sink = <ScopedSink<usize, AnyError>>::new(|mut src| {
             Box::pin(async move {
                 println!("Starting sink");
                 while let Some(v) = src.next().await {
@@ -584,6 +588,8 @@ mod tests {
         });
 
         test_helper(async move {
+            let mut sink = pin!(sink);
+
             sink.feed(1).await?;
 
             println!("Closing");
@@ -596,7 +602,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_many() -> AnyResult<()> {
-        let mut sink: ScopedSink<usize, AnyError> = ScopedSink::new(|mut src| {
+        let sink = <ScopedSink<usize, AnyError>>::new(|mut src| {
             Box::pin(async move {
                 println!("Starting sink");
                 while let Some(v) = src.next().await {
@@ -609,6 +615,8 @@ mod tests {
         });
 
         test_helper(async move {
+            let mut sink = pin!(sink);
+
             for i in 0..10 {
                 println!("Sending: {i}");
                 sink.feed(i).await?;
@@ -624,7 +632,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_yield() -> AnyResult<()> {
-        let mut sink: ScopedSink<usize, AnyError> = ScopedSink::new(|mut src| {
+        let sink = <ScopedSink<usize, AnyError>>::new(|mut src| {
             Box::pin(async move {
                 println!("Starting sink");
                 while let Some(v) = src.next().await {
@@ -640,6 +648,8 @@ mod tests {
         });
 
         test_helper(async move {
+            let mut sink = pin!(sink);
+
             for i in 0..10 {
                 println!("Sending: {i}");
                 sink.feed(i).await?;
@@ -655,7 +665,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_yield2() -> AnyResult<()> {
-        let mut sink: ScopedSink<usize, AnyError> = ScopedSink::new(|mut src| {
+        let sink = <ScopedSink<usize, AnyError>>::new(|mut src| {
             Box::pin(async move {
                 println!("Starting sink");
                 while let Some(v) = src.next().await {
@@ -671,6 +681,8 @@ mod tests {
         });
 
         test_helper(async move {
+            let mut sink = pin!(sink);
+
             for i in 0..10 {
                 println!("Sending: {i}");
                 sink.feed(i).await?;
@@ -690,7 +702,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_many_flush() -> AnyResult<()> {
-        let mut sink: ScopedSink<usize, AnyError> = ScopedSink::new(|mut src| {
+        let sink = <ScopedSink<usize, AnyError>>::new(|mut src| {
             Box::pin(async move {
                 println!("Starting sink");
                 while let Some(v) = src.next().await {
@@ -703,6 +715,8 @@ mod tests {
         });
 
         test_helper(async move {
+            let mut sink = pin!(sink);
+
             for i in 0..10 {
                 println!("Sending: {i}");
                 sink.feed(i).await?;
@@ -727,7 +741,7 @@ mod tests {
     #[tokio::test]
     async fn test_return_then_receive() -> AnyResult<()> {
         let v = Arc::new(AtomicU8::new(0));
-        let mut sink: ScopedSink<usize, AnyError> = ScopedSink::new(move |mut src| {
+        let sink = <ScopedSink<usize, AnyError>>::new(move |mut src| {
             let v = v.clone();
             Box::pin(async move {
                 let mut v_ = v.load(Ordering::SeqCst);
@@ -745,6 +759,8 @@ mod tests {
         });
 
         test_helper(async move {
+            let mut sink = pin!(sink);
+
             for _ in 0..10 {
                 println!("Sending");
                 sink.feed(1).await?;

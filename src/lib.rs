@@ -63,6 +63,7 @@
 //!
 //! Using [`ScopedSink`]:
 //! ```
+//! use std::pin::pin;
 //! use std::time::Duration;
 //!
 //! use anyhow::Error;
@@ -73,7 +74,7 @@
 //! #[tokio::main]
 //! async fn main() -> Result<(), Error> {
 //!     // Create new sink
-//!     let mut sink = <ScopedSink<usize, Error>>::new(|mut stream| Box::pin(async move {
+//!     let mut sink = pin!(<ScopedSink<usize, Error>>::new(|mut stream| Box::pin(async move {
 //!         // Unlike ScopedStream, this closure will be called over and over again,
 //!         // until all values are consumed
 //!
@@ -84,7 +85,7 @@
 //!         }
 //!
 //!         Ok(())
-//!     }));
+//!     })));
 //!
 //!     for i in 0..10 {
 //!         sink.send(i).await?;
