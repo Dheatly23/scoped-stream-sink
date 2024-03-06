@@ -28,6 +28,7 @@
 //!
 //! Using [`ScopedStream`]:
 //! ```
+//! use std::pin::pin;
 //! use std::time::Duration;
 //!
 //! use futures_util::{SinkExt, StreamExt};
@@ -37,7 +38,7 @@
 //! #[tokio::main]
 //! async fn main() {
 //!     // Create new scoped stream
-//!     let mut stream = ScopedStream::new(|mut sink| Box::pin(async move {
+//!     let mut stream = pin!(ScopedStream::new(|mut sink| Box::pin(async move {
 //!         // We have to Box::pin it because otherwise the trait bounds is too complex
 //!         // Interior sink cannot outlast the lifetime of it's outer stream
 //!
@@ -51,7 +52,7 @@
 //!             (a, b) = (b, a + b);
 //!             tokio::time::sleep(Duration::from_millis(100)).await;
 //!         }
-//!     }));
+//!     })));
 //!
 //!     let mut v = Vec::new();
 //!     while let Some(i) = stream.next().await {

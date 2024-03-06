@@ -1,51 +1,70 @@
 use core::convert::Infallible;
 use core::future::Future;
 use core::marker::{PhantomData, PhantomPinned};
-use core::mem::transmute;
+use core::ops::DerefMut;
 use core::pin::Pin;
+use core::ptr::NonNull;
 use core::task::{Context, Poll};
-use std::ops::DerefMut;
 
 use futures_core::Stream;
 use futures_sink::Sink;
-use pin_project_lite::pin_project;
 
 #[cfg(feature = "std")]
 use crate::LocalThread;
 
 #[cfg(feature = "std")]
+type DynStreamFn<'env, T> = Pin<
+    Box<
+        dyn 'env
+            + Send
+            + for<'scope> FnMut(Pin<&'scope mut StreamInner<'scope, 'env, T>>) -> DynStreamFut<'scope>,
+    >,
+>;
+#[cfg(feature = "std")]
 type DynStreamFut<'scope> = Pin<Box<dyn Future<Output = ()> + Send + 'scope>>;
+#[cfg(feature = "std")]
+type DynTryStreamFn<'env, T, E> = Pin<
+    Box<
+        dyn 'env
+            + Send
+            + for<'scope> FnMut(
+                Pin<&'scope mut TryStreamInner<'scope, 'env, T, E>>,
+            ) -> DynTryStreamFut<'scope, E>,
+    >,
+>;
 #[cfg(feature = "std")]
 type DynTryStreamFut<'scope, E> = Pin<Box<dyn Future<Output = Result<(), E>> + Send + 'scope>>;
 
-#[cfg(feature = "std")]
-pin_project! {
-    /// Stream with a scoped future.
-    ///
-    /// It is useful to easily create [`Stream`] type, without
-    /// hassle of manually constructing one or using macros
-    /// (like [`async_stream`](https://docs.rs/async-stream/latest/async_stream/)).
-    /// Safety is guaranteed by carefully scoping [`StreamInner`],
-    /// similiar to [`scope`](std::thread::scope).
-    pub struct ScopedStream<'env, T> {
-        fut: Option<DynStreamFut<'env>>,
-
-        data: Pin<Box<StreamInner<'env, 'env, T>>>,
-    }
+enum StreamEnum<Func, Fut> {
+    None,
+    Func(Func),
+    Fut(Fut),
 }
 
 #[cfg(feature = "std")]
-pin_project! {
-    /// Fallible stream with a scoped future.
-    ///
-    /// Similiar to [`ScopedStream`], but allows for an error type. Future inside may fail,
-    /// unlike [`ScopedStream`]. Also, the inner [`TryStreamInner`] allows for either sending
-    /// an item or [`Result`] type.
-    pub struct ScopedTryStream<'env, T, E> {
-        fut: Option<DynTryStreamFut<'env, E>>,
+/// Stream with a scoped future.
+///
+/// It is useful to easily create [`Stream`] type, without
+/// hassle of manually constructing one or using macros
+/// (like [`async_stream`](https://docs.rs/async-stream/latest/async_stream/)).
+/// Safety is guaranteed by carefully scoping [`StreamInner`],
+/// similiar to [`scope`](std::thread::scope).
+pub struct ScopedStream<'env, T> {
+    fut: StreamEnum<DynStreamFn<'env, T>, DynStreamFut<'env>>,
 
-        data: Pin<Box<TryStreamInner<'env, 'env, T, E>>>,
-    }
+    data: StreamInner<'env, 'env, T>,
+}
+
+#[cfg(feature = "std")]
+/// Fallible stream with a scoped future.
+///
+/// Similiar to [`ScopedStream`], but allows for an error type. Future inside may fail,
+/// unlike [`ScopedStream`]. Also, the inner [`TryStreamInner`] allows for either sending
+/// an item or [`Result`] type.
+pub struct ScopedTryStream<'env, T, E> {
+    fut: StreamEnum<DynTryStreamFn<'env, T, E>, DynTryStreamFut<'env, E>>,
+
+    data: TryStreamInner<'env, 'env, T, E>,
 }
 
 struct StreamInnerData<T> {
@@ -54,54 +73,46 @@ struct StreamInnerData<T> {
 }
 
 #[cfg(feature = "std")]
-pin_project! {
-    /// Inner type of [`ScopedStream`].
-    ///
-    /// Implements [`Sink`] to send data for the stream.
-    ///
-    /// # Note About Thread-safety
-    ///
-    /// Even though [`StreamInner`] is both [`Send`] and [`Sink`], it's reference
-    /// **should** not be sent across thread. This is currently impossible, due to
-    /// lack of async version of [`scope`](std::thread::scope).
-    /// To future-proof that possibility, any usage of it will panic if called from different
-    /// thread than the outer thread. It also may panics outer thread too.
-    ///
-    /// Also do note that some of the check depends on `debug_assertions` build config
-    /// (AKA only on debug builds).
-    pub struct StreamInner<'scope, 'env: 'scope, T> {
-        inner: LocalThread<StreamInnerData<T>>,
+/// Inner type of [`ScopedStream`].
+///
+/// Implements [`Sink`] to send data for the stream.
+///
+/// # Note About Thread-safety
+///
+/// Even though [`StreamInner`] is both [`Send`] and [`Sink`], it's reference
+/// **should** not be sent across thread. This is currently impossible, due to
+/// lack of async version of [`scope`](std::thread::scope).
+/// To future-proof that possibility, any usage of it will panic if called from different
+/// thread than the outer thread. It also may panics outer thread too.
+///
+/// Also do note that some of the check depends on `debug_assertions` build config
+/// (AKA only on debug builds).
+pub struct StreamInner<'scope, 'env: 'scope, T> {
+    inner: LocalThread<StreamInnerData<T>>,
 
-        #[pin]
-        pinned: PhantomPinned,
-        phantom: PhantomData<&'scope mut &'env T>,
-    }
+    phantom: PhantomData<(PhantomPinned, &'scope mut &'env T)>,
 }
 
 #[cfg(feature = "std")]
-pin_project! {
-    /// Inner type of [`ScopedTryStream`].
-    ///
-    /// Implements [`Sink`] for both item type and a [`Result`],
-    /// allowing to send error (if you so choose).
-    ///
-    /// # Note About Thread-safety
-    ///
-    /// Even though [`TryStreamInner`] is both [`Send`] and [`Sink`], it's reference
-    /// **should** not be sent across thread. This is currently impossible, due to
-    /// lack of async version of [`scope`](std::thread::scope).
-    /// To future-proof that possibility, any usage of it will panic if called from different
-    /// thread than the outer thread. It also may panics outer thread too.
-    ///
-    /// Also do note that some of the check depends on `debug_assertions` build config
-    /// (AKA only on debug builds).
-    pub struct TryStreamInner<'scope, 'env: 'scope, T, E> {
-        inner: LocalThread<StreamInnerData<Result<T, E>>>,
+/// Inner type of [`ScopedTryStream`].
+///
+/// Implements [`Sink`] for both item type and a [`Result`],
+/// allowing to send error (if you so choose).
+///
+/// # Note About Thread-safety
+///
+/// Even though [`TryStreamInner`] is both [`Send`] and [`Sink`], it's reference
+/// **should** not be sent across thread. This is currently impossible, due to
+/// lack of async version of [`scope`](std::thread::scope).
+/// To future-proof that possibility, any usage of it will panic if called from different
+/// thread than the outer thread. It also may panics outer thread too.
+///
+/// Also do note that some of the check depends on `debug_assertions` build config
+/// (AKA only on debug builds).
+pub struct TryStreamInner<'scope, 'env: 'scope, T, E> {
+    inner: LocalThread<StreamInnerData<Result<T, E>>>,
 
-        #[pin]
-        pinned: PhantomPinned,
-        phantom: PhantomData<&'scope mut &'env (T, E)>,
-    }
+    phantom: PhantomData<(PhantomPinned, &'scope mut &'env (T, E))>,
 }
 
 #[cfg(feature = "std")]
@@ -113,19 +124,20 @@ impl<'env, T> ScopedStream<'env, T> {
     /// # Examples
     ///
     /// ```
+    /// # use std::pin::pin;
     /// # use anyhow::Error;
     /// # use futures_util::{SinkExt, StreamExt};
     /// # use scoped_stream_sink::ScopedStream;
     /// # fn main() -> Result<(), Error> {
     /// # tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
-    /// let mut stream = <ScopedStream<usize>>::new(|mut sink| Box::pin(async move {
+    /// let mut stream = pin!(<ScopedStream<usize>>::new(|mut sink| Box::pin(async move {
     ///     // Send a value.
     ///     // It is okay to unwrap() because it is infallible.
     ///     sink.send(1).await.unwrap();
     ///
     ///     // (Optional) close the sink. NOTE: sink cannot be used afterwards.
     ///     // sink.close().await.unwrap();
-    /// }));
+    /// })));
     ///
     /// // Receive all values
     /// while let Some(i) = stream.next().await {
@@ -135,26 +147,24 @@ impl<'env, T> ScopedStream<'env, T> {
     /// ```
     pub fn new<F>(f: F) -> Self
     where
-        for<'scope> F: FnOnce(
-            Pin<&'scope mut StreamInner<'scope, 'env, T>>,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'scope>>,
+        for<'scope> F: 'env
+            + Send
+            + FnOnce(
+                Pin<&'scope mut StreamInner<'scope, 'env, T>>,
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + 'scope>>,
     {
-        let mut data = Box::pin(StreamInner {
-            inner: LocalThread::new(StreamInnerData {
-                data: None,
-                closed: false,
-            }),
-
-            pinned: PhantomPinned,
-            phantom: PhantomData,
-        });
-
-        let ptr = unsafe { transmute::<Pin<&mut StreamInner<T>>, _>(data.as_mut()) };
-        let fut = f(ptr);
+        let mut f = Some(f);
 
         Self {
-            fut: Some(fut),
-            data,
+            fut: StreamEnum::Func(Box::pin(move |sink| f.take().unwrap()(sink))),
+            data: StreamInner {
+                inner: LocalThread::new(StreamInnerData {
+                    data: None,
+                    closed: false,
+                }),
+
+                phantom: PhantomData,
+            },
         }
     }
 }
@@ -168,12 +178,13 @@ impl<'env, T, E> ScopedTryStream<'env, T, E> {
     /// # Examples
     ///
     /// ```
+    /// # use std::pin::pin;
     /// # use anyhow::Error;
     /// # use futures_util::{SinkExt, StreamExt};
     /// # use scoped_stream_sink::ScopedTryStream;
     /// # fn main() -> Result<(), Error> {
     /// # tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
-    /// let mut stream = <ScopedTryStream<_, Error>>::new(|mut sink| Box::pin(async move {
+    /// let mut stream = pin!(<ScopedTryStream<_, Error>>::new(|mut sink| Box::pin(async move {
     ///     // Send a value.
     ///     sink.send(1).await?;
     ///
@@ -181,7 +192,7 @@ impl<'env, T, E> ScopedTryStream<'env, T, E> {
     ///     // sink.close().await.unwrap();
     ///
     ///     Ok(())
-    /// }));
+    /// })));
     ///
     /// // Receive all values
     /// while let Some(i) = stream.next().await.transpose()? {
@@ -192,47 +203,45 @@ impl<'env, T, E> ScopedTryStream<'env, T, E> {
     /// ```
     pub fn new<F>(f: F) -> Self
     where
-        for<'scope> F: FnOnce(
-            Pin<&'scope mut TryStreamInner<'scope, 'env, T, E>>,
-        )
-            -> Pin<Box<dyn Future<Output = Result<(), E>> + Send + 'scope>>,
+        for<'scope> F: 'env
+            + Send
+            + FnOnce(
+                Pin<&'scope mut TryStreamInner<'scope, 'env, T, E>>,
+            ) -> Pin<Box<dyn Future<Output = Result<(), E>> + Send + 'scope>>,
     {
-        let mut data = Box::pin(TryStreamInner {
-            inner: LocalThread::new(StreamInnerData {
-                data: None,
-                closed: false,
-            }),
-
-            pinned: PhantomPinned,
-            phantom: PhantomData,
-        });
-
-        let ptr = unsafe { transmute::<Pin<&mut TryStreamInner<T, E>>, _>(data.as_mut()) };
-        let fut = f(ptr);
+        let mut f = Some(f);
 
         Self {
-            fut: Some(fut),
-            data,
+            fut: StreamEnum::Func(Box::pin(move |sink| f.take().unwrap()(sink))),
+            data: TryStreamInner {
+                inner: LocalThread::new(StreamInnerData {
+                    data: None,
+                    closed: false,
+                }),
+
+                phantom: PhantomData,
+            },
         }
     }
 }
 
 impl<T, E> StreamInnerData<Result<T, E>> {
-    fn next_fallible<U>(
+    fn next_fallible<Func, Fut>(
         &mut self,
         cx: &mut Context<'_>,
-        fut: &mut Option<Pin<U>>,
+        fut: &mut StreamEnum<Func, Pin<Fut>>,
     ) -> Poll<Option<Result<T, E>>>
     where
-        U: DerefMut,
-        U::Target: Future<Output = Result<(), E>>,
+        Fut: DerefMut,
+        Fut::Target: Future<Output = Result<(), E>>,
     {
         let res = match fut {
-            Some(v) => v.as_mut().poll(cx),
-            None => return Poll::Ready(None),
+            StreamEnum::Fut(v) => v.as_mut().poll(cx),
+            StreamEnum::None => return Poll::Ready(None),
+            _ => unreachable!(),
         };
         if res.is_ready() {
-            *fut = None;
+            *fut = StreamEnum::None;
 
             if let Poll::Ready(Err(e)) = res {
                 return Poll::Ready(Some(Err(e)));
@@ -249,17 +258,22 @@ impl<T, E> StreamInnerData<Result<T, E>> {
 }
 
 impl<T> StreamInnerData<T> {
-    fn next<F>(&mut self, cx: &mut Context<'_>, fut: &mut Option<Pin<F>>) -> Poll<Option<T>>
+    fn next<Func, Fut>(
+        &mut self,
+        cx: &mut Context<'_>,
+        fut: &mut StreamEnum<Func, Pin<Fut>>,
+    ) -> Poll<Option<T>>
     where
-        F: DerefMut,
-        F::Target: Future<Output = ()>,
+        Fut: DerefMut,
+        Fut::Target: Future<Output = ()>,
     {
         let res = match fut {
-            Some(v) => v.as_mut().poll(cx),
-            None => return Poll::Ready(None),
+            StreamEnum::Fut(v) => v.as_mut().poll(cx),
+            StreamEnum::None => return Poll::Ready(None),
+            _ => unreachable!(),
         };
         if res.is_ready() {
-            *fut = None;
+            *fut = StreamEnum::None;
         }
 
         let ret = self.data.take();
@@ -298,18 +312,30 @@ impl<T> StreamInnerData<T> {
     }
 }
 
+unsafe fn make_future<'a, T: 'a, R, F>(mut ptr: NonNull<T>, mut f: F) -> impl FnMut() -> R
+where
+    F: FnMut(Pin<&'a mut T>) -> R,
+{
+    move || f(Pin::new_unchecked(ptr.as_mut()))
+}
+
 #[cfg(feature = "std")]
 impl<'env, T> Stream for ScopedStream<'env, T> {
     type Item = T;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.project();
-        this.data
-            .as_mut()
-            .project()
-            .inner
-            .set_inner_ctx()
-            .next(cx, this.fut)
+        // SAFETY: No non-unpin value is moved out.
+        let this = unsafe { self.get_unchecked_mut() };
+
+        if let StreamEnum::Func(f) = &mut this.fut {
+            // SAFETY: We constrained data lifetime to be 'scope.
+            // Since 'scope is contained within self, it is safe to extend it.
+            let fut =
+                unsafe { make_future(NonNull::from(&this.data), f.as_mut().get_unchecked_mut())() };
+            this.fut = StreamEnum::Fut(fut);
+        }
+
+        this.data.inner.set_inner_ctx().next(cx, &mut this.fut)
     }
 }
 
@@ -318,13 +344,21 @@ impl<'env, T, E> Stream for ScopedTryStream<'env, T, E> {
     type Item = Result<T, E>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.project();
+        // SAFETY: No non-unpin value is moved out.
+        let this = unsafe { self.get_unchecked_mut() };
+
+        if let StreamEnum::Func(f) = &mut this.fut {
+            // SAFETY: We constrained data lifetime to be 'scope.
+            // Since 'scope is contained within self, it is safe to extend it.
+            let fut =
+                unsafe { make_future(NonNull::from(&this.data), f.as_mut().get_unchecked_mut())() };
+            this.fut = StreamEnum::Fut(fut);
+        }
+
         this.data
-            .as_mut()
-            .project()
             .inner
             .set_inner_ctx()
-            .next_fallible(cx, this.fut)
+            .next_fallible(cx, &mut this.fut)
     }
 }
 
@@ -393,55 +427,59 @@ impl<'scope, 'env: 'scope, T, E> Sink<T> for TryStreamInner<'scope, 'env, T, E> 
     }
 }
 
+type DynLocalStreamFn<'env, T> = Pin<
+    Box<
+        dyn 'env
+            + for<'scope> FnMut(
+                Pin<&'scope mut LocalStreamInner<'scope, 'env, T>>,
+            ) -> DynLocalStreamFut<'scope>,
+    >,
+>;
 type DynLocalStreamFut<'scope> = Pin<Box<dyn Future<Output = ()> + 'scope>>;
+type DynLocalTryStreamFn<'env, T, E> = Pin<
+    Box<
+        dyn 'env
+            + for<'scope> FnMut(
+                Pin<&'scope mut LocalTryStreamInner<'scope, 'env, T, E>>,
+            ) -> DynLocalTryStreamFut<'scope, E>,
+    >,
+>;
 type DynLocalTryStreamFut<'scope, E> = Pin<Box<dyn Future<Output = Result<(), E>> + 'scope>>;
 
-pin_project! {
-    /// Local stream with a scoped future.
-    ///
-    /// Unlike [`ScopedStream`] it is not [`Send`], so it can work in no-std environment.
-    pub struct LocalScopedStream<'env, T> {
-        fut: Option<DynLocalStreamFut<'env>>,
+/// Local stream with a scoped future.
+///
+/// Unlike [`ScopedStream`] it is not [`Send`], so it can work in no-std environment.
+pub struct LocalScopedStream<'env, T> {
+    fut: StreamEnum<DynLocalStreamFn<'env, T>, DynLocalStreamFut<'env>>,
 
-        data: Pin<Box<LocalStreamInner<'env, 'env, T>>>,
-    }
+    data: LocalStreamInner<'env, 'env, T>,
 }
 
-pin_project! {
-    /// Local stream with a scoped future.
-    ///
-    /// Unlike [`ScopedTryStream`] it is not [`Send`], so it can work in no-std environment.
-    pub struct LocalScopedTryStream<'env, T, E> {
-        fut: Option<DynLocalTryStreamFut<'env, E>>,
+/// Local stream with a scoped future.
+///
+/// Unlike [`ScopedTryStream`] it is not [`Send`], so it can work in no-std environment.
+pub struct LocalScopedTryStream<'env, T, E> {
+    fut: StreamEnum<DynLocalTryStreamFn<'env, T, E>, DynLocalTryStreamFut<'env, E>>,
 
-        data: Pin<Box<LocalTryStreamInner<'env, 'env, T, E>>>,
-    }
+    data: LocalTryStreamInner<'env, 'env, T, E>,
 }
 
-pin_project! {
-    /// Inner type of [`LocalScopedStream`].
-    ///
-    /// Similiar to [`StreamInner`], but not [`Send`].
-    pub struct LocalStreamInner<'scope, 'env: 'scope, T> {
-        inner: StreamInnerData<T>,
+/// Inner type of [`LocalScopedStream`].
+///
+/// Similiar to [`StreamInner`], but not [`Send`].
+pub struct LocalStreamInner<'scope, 'env: 'scope, T> {
+    inner: StreamInnerData<T>,
 
-        #[pin]
-        pinned: PhantomPinned,
-        phantom: PhantomData<(&'scope mut &'env T, *mut u8)>,
-    }
+    phantom: PhantomData<(PhantomPinned, &'scope mut &'env T, *mut u8)>,
 }
 
-pin_project! {
-    /// Inner type of [`LocalScopedTryStream`].
-    ///
-    /// Similiar to [`TryStreamInner`], but not [`Send`].
-    pub struct LocalTryStreamInner<'scope, 'env: 'scope, T, E> {
-        inner: StreamInnerData<Result<T, E>>,
+/// Inner type of [`LocalScopedTryStream`].
+///
+/// Similiar to [`TryStreamInner`], but not [`Send`].
+pub struct LocalTryStreamInner<'scope, 'env: 'scope, T, E> {
+    inner: StreamInnerData<Result<T, E>>,
 
-        #[pin]
-        pinned: PhantomPinned,
-        phantom: PhantomData<(&'scope mut &'env (T, E), *mut u8)>,
-    }
+    phantom: PhantomData<(PhantomPinned, &'scope mut &'env (T, E), *mut u8)>,
 }
 
 impl<'env, T> LocalScopedStream<'env, T> {
@@ -452,19 +490,20 @@ impl<'env, T> LocalScopedStream<'env, T> {
     /// # Examples
     ///
     /// ```
+    /// # use std::pin::pin;
     /// # use anyhow::Error;
     /// # use futures_util::{SinkExt, StreamExt};
     /// # use scoped_stream_sink::LocalScopedStream;
     /// # fn main() -> Result<(), Error> {
     /// # tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
-    /// let mut stream = <LocalScopedStream<usize>>::new(|mut sink| Box::pin(async move {
+    /// let mut stream = pin!(<LocalScopedStream<usize>>::new(|mut sink| Box::pin(async move {
     ///     // Send a value.
     ///     // It is okay to unwrap() because it is infallible.
     ///     sink.send(1).await.unwrap();
     ///
     ///     // (Optional) close the sink. NOTE: sink cannot be used afterwards.
     ///     // sink.close().await.unwrap();
-    /// }));
+    /// })));
     ///
     /// // Receive all values
     /// while let Some(i) = stream.next().await {
@@ -474,26 +513,23 @@ impl<'env, T> LocalScopedStream<'env, T> {
     /// ```
     pub fn new<F>(f: F) -> Self
     where
-        for<'scope> F: FnOnce(
-            Pin<&'scope mut LocalStreamInner<'scope, 'env, T>>,
-        ) -> Pin<Box<dyn Future<Output = ()> + 'scope>>,
+        for<'scope> F: 'env
+            + FnOnce(
+                Pin<&'scope mut LocalStreamInner<'scope, 'env, T>>,
+            ) -> Pin<Box<dyn Future<Output = ()> + 'scope>>,
     {
-        let mut data = Box::pin(LocalStreamInner {
-            inner: StreamInnerData {
-                data: None,
-                closed: false,
-            },
-
-            pinned: PhantomPinned,
-            phantom: PhantomData,
-        });
-
-        let ptr = unsafe { transmute::<Pin<&mut LocalStreamInner<T>>, _>(data.as_mut()) };
-        let fut = f(ptr);
+        let mut f = Some(f);
 
         Self {
-            fut: Some(fut),
-            data,
+            fut: StreamEnum::Func(Box::pin(move |sink| f.take().unwrap()(sink))),
+            data: LocalStreamInner {
+                inner: StreamInnerData {
+                    data: None,
+                    closed: false,
+                },
+
+                phantom: PhantomData,
+            },
         }
     }
 }
@@ -506,12 +542,13 @@ impl<'env, T, E> LocalScopedTryStream<'env, T, E> {
     /// # Examples
     ///
     /// ```
+    /// # use std::pin::pin;
     /// # use anyhow::Error;
     /// # use futures_util::{SinkExt, StreamExt};
     /// # use scoped_stream_sink::LocalScopedTryStream;
     /// # fn main() -> Result<(), Error> {
     /// # tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
-    /// let mut stream = <LocalScopedTryStream<_, Error>>::new(|mut sink| Box::pin(async move {
+    /// let mut stream = pin!(<LocalScopedTryStream<_, Error>>::new(|mut sink| Box::pin(async move {
     ///     // Send a value.
     ///     sink.send(1).await?;
     ///
@@ -519,7 +556,7 @@ impl<'env, T, E> LocalScopedTryStream<'env, T, E> {
     ///     // sink.close().await.unwrap();
     ///
     ///     Ok(())
-    /// }));
+    /// })));
     ///
     /// // Receive all values
     /// while let Some(i) = stream.next().await.transpose()? {
@@ -530,26 +567,23 @@ impl<'env, T, E> LocalScopedTryStream<'env, T, E> {
     /// ```
     pub fn new<F>(f: F) -> Self
     where
-        for<'scope> F: FnOnce(
-            Pin<&'scope mut LocalTryStreamInner<'scope, 'env, T, E>>,
-        ) -> Pin<Box<dyn Future<Output = Result<(), E>> + 'scope>>,
+        for<'scope> F: 'env
+            + FnOnce(
+                Pin<&'scope mut LocalTryStreamInner<'scope, 'env, T, E>>,
+            ) -> Pin<Box<dyn Future<Output = Result<(), E>> + 'scope>>,
     {
-        let mut data = Box::pin(LocalTryStreamInner {
-            inner: StreamInnerData {
-                data: None,
-                closed: false,
-            },
-
-            pinned: PhantomPinned,
-            phantom: PhantomData,
-        });
-
-        let ptr = unsafe { transmute::<Pin<&mut LocalTryStreamInner<T, E>>, _>(data.as_mut()) };
-        let fut = f(ptr);
+        let mut f = Some(f);
 
         Self {
-            fut: Some(fut),
-            data,
+            fut: StreamEnum::Func(Box::pin(move |sink| f.take().unwrap()(sink))),
+            data: LocalTryStreamInner {
+                inner: StreamInnerData {
+                    data: None,
+                    closed: false,
+                },
+
+                phantom: PhantomData,
+            },
         }
     }
 }
@@ -558,8 +592,18 @@ impl<'env, T> Stream for LocalScopedStream<'env, T> {
     type Item = T;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.project();
-        this.data.as_mut().project().inner.next(cx, this.fut)
+        // SAFETY: No non-unpin value is moved out.
+        let this = unsafe { self.get_unchecked_mut() };
+
+        if let StreamEnum::Func(f) = &mut this.fut {
+            // SAFETY: We constrained data lifetime to be 'scope.
+            // Since 'scope is contained within self, it is safe to extend it.
+            let fut =
+                unsafe { make_future(NonNull::from(&this.data), f.as_mut().get_unchecked_mut())() };
+            this.fut = StreamEnum::Fut(fut);
+        }
+
+        this.data.inner.next(cx, &mut this.fut)
     }
 }
 
@@ -567,12 +611,18 @@ impl<'env, T, E> Stream for LocalScopedTryStream<'env, T, E> {
     type Item = Result<T, E>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.project();
-        this.data
-            .as_mut()
-            .project()
-            .inner
-            .next_fallible(cx, this.fut)
+        // SAFETY: No non-unpin value is moved out.
+        let this = unsafe { self.get_unchecked_mut() };
+
+        if let StreamEnum::Func(f) = &mut this.fut {
+            // SAFETY: We constrained data lifetime to be 'scope.
+            // Since 'scope is contained within self, it is safe to extend it.
+            let fut =
+                unsafe { make_future(NonNull::from(&this.data), f.as_mut().get_unchecked_mut())() };
+            this.fut = StreamEnum::Fut(fut);
+        }
+
+        this.data.inner.next_fallible(cx, &mut this.fut)
     }
 }
 
@@ -584,16 +634,19 @@ impl<'scope, 'env: 'scope, T> Sink<T> for LocalStreamInner<'scope, 'env, T> {
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.project().inner.flush()
+        // SAFETY: No non-unpin value is moved out.
+        unsafe { self.get_unchecked_mut().inner.flush() }
     }
 
     fn start_send(self: Pin<&mut Self>, item: T) -> Result<(), Self::Error> {
-        self.project().inner.send(item);
+        // SAFETY: No non-unpin value is moved out.
+        unsafe { self.get_unchecked_mut().inner.send(item) }
         Ok(())
     }
 
     fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.project().inner.close()
+        // SAFETY: No non-unpin value is moved out.
+        unsafe { self.get_unchecked_mut().inner.close() }
     }
 }
 
@@ -605,16 +658,19 @@ impl<'scope, 'env: 'scope, T, E> Sink<Result<T, E>> for LocalTryStreamInner<'sco
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
-        self.project().inner.flush()
+        // SAFETY: No non-unpin value is moved out.
+        unsafe { self.get_unchecked_mut().inner.flush() }
     }
 
     fn start_send(self: Pin<&mut Self>, item: Result<T, E>) -> Result<(), Infallible> {
-        self.project().inner.send(item);
+        // SAFETY: No non-unpin value is moved out.
+        unsafe { self.get_unchecked_mut().inner.send(item) }
         Ok(())
     }
 
     fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
-        self.project().inner.close()
+        // SAFETY: No non-unpin value is moved out.
+        unsafe { self.get_unchecked_mut().inner.close() }
     }
 }
 
@@ -678,6 +734,8 @@ mod tests {
             })));
 
         test_helper(async move {
+            let mut stream = pin!(stream);
+
             while let Some(i) = stream.next().await {
                 println!("{i}");
             }
@@ -690,9 +748,11 @@ mod tests {
     */
     #[tokio::test]
     async fn test_simple() -> AnyResult<()> {
-        let mut stream: ScopedStream<usize> = ScopedStream::new(|_| Box::pin(async {}));
+        let stream = <ScopedStream<usize>>::new(|_| Box::pin(async {}));
 
         test_helper(async move {
+            let mut stream = pin!(stream);
+
             assert_eq!(stream.next().await, None);
 
             Ok(())
@@ -702,13 +762,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_recv_one() -> AnyResult<()> {
-        let mut stream: ScopedStream<usize> = ScopedStream::new(|mut src| {
+        let stream = <ScopedStream<usize>>::new(|mut src| {
             Box::pin(async move {
                 src.send(1).await.unwrap();
             })
         });
 
         test_helper(async move {
+            let mut stream = pin!(stream);
+
             assert_eq!(stream.next().await, Some(1));
             assert_eq!(stream.next().await, None);
 
@@ -719,7 +781,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_recv_yield() -> AnyResult<()> {
-        let mut stream = <ScopedStream<usize>>::new(|_| {
+        let stream = <ScopedStream<usize>>::new(|_| {
             Box::pin(async move {
                 for _ in 0..5 {
                     yield_now().await;
@@ -728,6 +790,8 @@ mod tests {
         });
 
         test_helper(async move {
+            let mut stream = pin!(stream);
+
             assert_eq!(stream.next().await, None);
 
             Ok(())
@@ -737,7 +801,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_recv_many() -> AnyResult<()> {
-        let mut stream = <ScopedStream<usize>>::new(|mut sink| {
+        let stream = <ScopedStream<usize>>::new(|mut sink| {
             Box::pin(async move {
                 for i in 0..10 {
                     sink.send(i).await.unwrap();
@@ -746,6 +810,8 @@ mod tests {
         });
 
         test_helper(async move {
+            let mut stream = pin!(stream);
+
             for i in 0..10 {
                 assert_eq!(stream.next().await, Some(i));
             }
@@ -758,7 +824,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_recv_many_yield() -> AnyResult<()> {
-        let mut stream = <ScopedStream<usize>>::new(|mut sink| {
+        let stream = <ScopedStream<usize>>::new(|mut sink| {
             Box::pin(async move {
                 for i in 0..10 {
                     sink.send(i).await.unwrap();
@@ -770,6 +836,8 @@ mod tests {
         });
 
         test_helper(async move {
+            let mut stream = pin!(stream);
+
             for i in 0..10 {
                 assert_eq!(stream.next().await, Some(i));
             }
@@ -782,9 +850,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_simple() -> AnyResult<()> {
-        let mut stream = <ScopedTryStream<usize, AnyError>>::new(|_| Box::pin(async { Ok(()) }));
+        let stream = <ScopedTryStream<usize, AnyError>>::new(|_| Box::pin(async { Ok(()) }));
 
         test_helper(async move {
+            let mut stream = pin!(stream);
+
             assert_eq!(stream.next().await.transpose()?, None);
 
             Ok(())
@@ -794,7 +864,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_recv_one() -> AnyResult<()> {
-        let mut stream = <ScopedTryStream<usize, AnyError>>::new(|mut src| {
+        let stream = <ScopedTryStream<usize, AnyError>>::new(|mut src| {
             Box::pin(async move {
                 src.send(1).await.unwrap();
 
@@ -803,6 +873,8 @@ mod tests {
         });
 
         test_helper(async move {
+            let mut stream = pin!(stream);
+
             assert_eq!(stream.next().await.transpose()?, Some(1));
             assert_eq!(stream.next().await.transpose()?, None);
 
@@ -813,7 +885,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_recv_yield() -> AnyResult<()> {
-        let mut stream = <ScopedTryStream<usize, AnyError>>::new(|_| {
+        let stream = <ScopedTryStream<usize, AnyError>>::new(|_| {
             Box::pin(async move {
                 for _ in 0..5 {
                     yield_now().await;
@@ -824,6 +896,8 @@ mod tests {
         });
 
         test_helper(async move {
+            let mut stream = pin!(stream);
+
             assert_eq!(stream.next().await.transpose()?, None);
 
             Ok(())
@@ -833,7 +907,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_recv_many() -> AnyResult<()> {
-        let mut stream = <ScopedTryStream<usize, AnyError>>::new(|mut sink| {
+        let stream = <ScopedTryStream<usize, AnyError>>::new(|mut sink| {
             Box::pin(async move {
                 for i in 0..10 {
                     sink.send(i).await.unwrap();
@@ -844,6 +918,8 @@ mod tests {
         });
 
         test_helper(async move {
+            let mut stream = pin!(stream);
+
             for i in 0..10 {
                 assert_eq!(stream.next().await.transpose()?, Some(i));
             }
@@ -856,7 +932,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_recv_many_yield() -> AnyResult<()> {
-        let mut stream = <ScopedTryStream<usize, AnyError>>::new(|mut sink| {
+        let stream = <ScopedTryStream<usize, AnyError>>::new(|mut sink| {
             Box::pin(async move {
                 for i in 0..10 {
                     sink.send(i).await?;
@@ -870,6 +946,8 @@ mod tests {
         });
 
         test_helper(async move {
+            let mut stream = pin!(stream);
+
             for i in 0..10 {
                 assert_eq!(stream.next().await.transpose()?, Some(i));
             }
