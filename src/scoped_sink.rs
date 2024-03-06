@@ -77,8 +77,7 @@ struct SinkInnerData<T> {
 pub struct SinkInner<'scope, 'env: 'scope, T> {
     inner: LocalThread<SinkInnerData<T>>,
 
-    pinned: PhantomPinned,
-    phantom: PhantomData<&'scope mut &'env T>,
+    phantom: PhantomData<(PhantomPinned, &'scope mut &'env T)>,
 }
 
 #[cfg(feature = "std")]
@@ -104,7 +103,6 @@ impl<'env, T: 'env, E: 'env> ScopedSink<'env, T, E> {
                     closed: false,
                 }),
 
-                pinned: PhantomPinned,
                 phantom: PhantomData,
             },
 
@@ -366,8 +364,7 @@ pub struct LocalScopedSink<'env, T, E> {
 pub struct LocalSinkInner<'scope, 'env: 'scope, T> {
     inner: SinkInnerData<T>,
 
-    pinned: PhantomPinned,
-    phantom: PhantomData<(&'scope mut &'env T, *mut u8)>,
+    phantom: PhantomData<(PhantomPinned, &'scope mut &'env T, *mut u8)>,
 }
 
 impl<'env, T: 'env, E: 'env> LocalScopedSink<'env, T, E> {
@@ -392,7 +389,6 @@ impl<'env, T: 'env, E: 'env> LocalScopedSink<'env, T, E> {
                     closed: false,
                 },
 
-                pinned: PhantomPinned,
                 phantom: PhantomData,
             },
 
