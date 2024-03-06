@@ -7,7 +7,6 @@ use std::ops::DerefMut;
 
 use futures_core::Stream;
 use futures_sink::Sink;
-use pin_project_lite::pin_project;
 
 #[cfg(feature = "std")]
 use crate::LocalThread;
@@ -39,21 +38,18 @@ pub type DynSinkFn<'env, T, E> = Box<
 pub type DynSinkFuture<'scope, E> = Pin<Box<dyn Future<Output = Result<(), E>> + Send + 'scope>>;
 
 #[cfg(feature = "std")]
-pin_project! {
-    /// Sink with a scoped future.
-    ///
-    /// It is useful to easily create [`Sink`] type, without
-    /// hassle of manually constructing one.
-    /// Safety is guaranteed by the inner reference cannot be moved outside the future,
-    /// similiar to [`scope`](std::thread::scope).
-    #[must_use = "Sink will not do anything if not used"]
-    pub struct ScopedSink<'env, T, E> {
-        f: DynSinkFn<'env, T, E>,
-        inner: Option<DynSinkFuture<'env, E>>,
+/// Sink with a scoped future.
+///
+/// It is useful to easily create [`Sink`] type, without
+/// hassle of manually constructing one.
+/// Safety is guaranteed by the inner reference cannot be moved outside the future,
+/// similiar to [`scope`](std::thread::scope).
+#[must_use = "Sink will not do anything if not used"]
+pub struct ScopedSink<'env, T, E> {
+    f: DynSinkFn<'env, T, E>,
+    inner: Option<DynSinkFuture<'env, E>>,
 
-        #[pin]
-        data: SinkInner<'env, 'env, T>,
-    }
+    data: SinkInner<'env, 'env, T>,
 }
 
 struct SinkInnerData<T> {
@@ -62,30 +58,27 @@ struct SinkInnerData<T> {
 }
 
 #[cfg(feature = "std")]
-pin_project! {
-    /// Inner type for [`ScopedSink`].
-    ///
-    /// `'scope` defines the lifetime of it's scope,
-    /// and `'env` defines the lifetime of it's environment. Lifetimes are constrained
-    /// such that the reference cannot be sent outside it's scope.
-    ///
-    /// # Note About Thread-safety
-    ///
-    /// Even though [`SinkInner`] is both [`Send`] and [`Sink`], it's reference
-    /// **should** not be sent across thread. This is currently impossible, due to
-    /// lack of async version of [`scope`](std::thread::scope).
-    /// To future-proof that possibility, any usage of it will panic if called from different
-    /// thread than the outer thread. It also may panics outer thread too.
-    ///
-    /// Also do note that some of the check depends on `debug_assertions` build config
-    /// (AKA only on debug builds).
-    pub struct SinkInner<'scope, 'env: 'scope, T> {
-        inner: LocalThread<SinkInnerData<T>>,
+/// Inner type for [`ScopedSink`].
+///
+/// `'scope` defines the lifetime of it's scope,
+/// and `'env` defines the lifetime of it's environment. Lifetimes are constrained
+/// such that the reference cannot be sent outside it's scope.
+///
+/// # Note About Thread-safety
+///
+/// Even though [`SinkInner`] is both [`Send`] and [`Sink`], it's reference
+/// **should** not be sent across thread. This is currently impossible, due to
+/// lack of async version of [`scope`](std::thread::scope).
+/// To future-proof that possibility, any usage of it will panic if called from different
+/// thread than the outer thread. It also may panics outer thread too.
+///
+/// Also do note that some of the check depends on `debug_assertions` build config
+/// (AKA only on debug builds).
+pub struct SinkInner<'scope, 'env: 'scope, T> {
+    inner: LocalThread<SinkInnerData<T>>,
 
-        #[pin]
-        pinned: PhantomPinned,
-        phantom: PhantomData<&'scope mut &'env T>,
-    }
+    pinned: PhantomPinned,
+    phantom: PhantomData<&'scope mut &'env T>,
 }
 
 #[cfg(feature = "std")]
@@ -278,17 +271,14 @@ impl<'env, T: 'env, E: 'env> ScopedSink<'env, T, E> {
         &mut Option<DynSinkFuture<'env, E>>,
         impl FnMut() -> DynSinkFuture<'env, E> + '_,
     ) {
-        let mut this = self.project();
+        // SAFETY: No non-unpin value is moved out.
+        let this = unsafe { self.get_unchecked_mut() };
+
         // SAFETY: We constrained data lifetime to be 'scope.
         // Since 'scope is contained within self, it is safe to extend it.
-        let f = unsafe {
-            make_future(
-                NonNull::from(this.data.as_mut().get_unchecked_mut()),
-                this.f,
-            )
-        };
+        let f = unsafe { make_future(NonNull::from(&this.data), &mut this.f) };
 
-        (this.data.project().inner.set_inner_ctx(), this.inner, f)
+        (this.data.inner.set_inner_ctx(), &mut this.inner, f)
     }
 }
 
@@ -307,13 +297,14 @@ impl<'env, T: 'env, E: 'env> Sink<T> for ScopedSink<'env, T, E> {
     }
 
     fn start_send(self: Pin<&mut Self>, item: T) -> Result<(), E> {
-        self.project()
-            .data
-            .as_mut()
-            .project()
-            .inner
-            .set_inner_ctx()
-            .send(item);
+        // SAFETY: No non-unpin value is moved out.
+        unsafe {
+            self.get_unchecked_mut()
+                .data
+                .inner
+                .set_inner_ctx()
+                .send(item)
+        }
         Ok(())
     }
 
@@ -358,31 +349,25 @@ pub type DynLocalSinkFn<'env, T, E> = Box<
 /// Erased type for the locally scoped future.
 pub type DynLocalSinkFuture<'scope, E> = Pin<Box<dyn Future<Output = Result<(), E>> + 'scope>>;
 
-pin_project! {
-    /// Local sink with a scoped future.
-    ///
-    /// Unlike [`ScopedSink`] it is not [`Send`], so it can work in no-std environment.
-    #[must_use = "Sink will not do anything if not used"]
-    pub struct LocalScopedSink<'env, T, E> {
-        f: DynLocalSinkFn<'env, T, E>,
-        inner: Option<DynLocalSinkFuture<'env, E>>,
+/// Local sink with a scoped future.
+///
+/// Unlike [`ScopedSink`] it is not [`Send`], so it can work in no-std environment.
+#[must_use = "Sink will not do anything if not used"]
+pub struct LocalScopedSink<'env, T, E> {
+    f: DynLocalSinkFn<'env, T, E>,
+    inner: Option<DynLocalSinkFuture<'env, E>>,
 
-        #[pin]
-        data: LocalSinkInner<'env, 'env, T>,
-    }
+    data: LocalSinkInner<'env, 'env, T>,
 }
 
-pin_project! {
-    /// Inner type for [`LocalScopedSink`].
-    ///
-    /// Similiar to [`SinkInner`], but not [`Send`].
-    pub struct LocalSinkInner<'scope, 'env: 'scope, T> {
-        inner: SinkInnerData<T>,
+/// Inner type for [`LocalScopedSink`].
+///
+/// Similiar to [`SinkInner`], but not [`Send`].
+pub struct LocalSinkInner<'scope, 'env: 'scope, T> {
+    inner: SinkInnerData<T>,
 
-        #[pin]
-        pinned: PhantomPinned,
-        phantom: PhantomData<(&'scope mut &'env T, *mut u8)>,
-    }
+    pinned: PhantomPinned,
+    phantom: PhantomData<(&'scope mut &'env T, *mut u8)>,
 }
 
 impl<'env, T: 'env, E: 'env> LocalScopedSink<'env, T, E> {
@@ -463,17 +448,14 @@ impl<'env, T: 'env, E: 'env> LocalScopedSink<'env, T, E> {
         &mut Option<DynLocalSinkFuture<'env, E>>,
         impl FnMut() -> DynLocalSinkFuture<'env, E> + '_,
     ) {
-        let mut this = self.project();
+        // SAFETY: No non-unpin value is moved out.
+        let this = unsafe { self.get_unchecked_mut() };
+
         // SAFETY: We constrained data lifetime to be 'scope.
         // Since 'scope is contained within self, it is safe to extend it.
-        let f = unsafe {
-            make_future(
-                NonNull::from(this.data.as_mut().get_unchecked_mut()),
-                this.f,
-            )
-        };
+        let f = unsafe { make_future(NonNull::from(&this.data), &mut this.f) };
 
-        (this.data.project().inner, this.inner, f)
+        (&mut this.data.inner, &mut this.inner, f)
     }
 }
 
@@ -491,7 +473,8 @@ impl<'env, T: 'env, E: 'env> Sink<T> for LocalScopedSink<'env, T, E> {
     }
 
     fn start_send(self: Pin<&mut Self>, item: T) -> Result<(), E> {
-        self.project().data.as_mut().project().inner.send(item);
+        // SAFETY: No non-unpin value is moved out.
+        unsafe { self.get_unchecked_mut().data.inner.send(item) }
         Ok(())
     }
 
@@ -506,7 +489,8 @@ impl<'scope, 'env: 'scope, T> Stream for LocalSinkInner<'scope, 'env, T> {
     type Item = T;
 
     fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.project().inner.next()
+        // SAFETY: No non-unpin value is moved out.
+        unsafe { self.get_unchecked_mut().inner.next() }
     }
 }
 
