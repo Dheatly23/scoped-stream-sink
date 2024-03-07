@@ -2,9 +2,9 @@ use core::convert::Infallible;
 use core::future::Future;
 use core::marker::{PhantomData, PhantomPinned};
 use core::mem::transmute;
+use core::ops::DerefMut;
 use core::pin::Pin;
 use core::task::{Context, Poll};
-use core::ops::DerefMut;
 
 use futures_core::Stream;
 use futures_sink::Sink;
