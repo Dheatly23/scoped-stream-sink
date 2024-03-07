@@ -3,7 +3,7 @@ use core::marker::{PhantomData, PhantomPinned};
 use core::pin::Pin;
 use core::ptr::NonNull;
 use core::task::{Context, Poll};
-use std::ops::DerefMut;
+use core::ops::DerefMut;
 
 use futures_core::Stream;
 use futures_sink::Sink;
