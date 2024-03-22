@@ -278,7 +278,7 @@ impl<'env, SI, RI, E> StreamSink<SI, RI> for ScopedStreamSink<'env, SI, RI, E> {
 }
 
 #[cfg(feature = "std")]
-impl<'scope, 'env: 'scope, SI, RI, E> Stream for StreamPart<'scope, 'env, SI, RI, E> {
+impl<'scope, 'env, SI, RI, E> Stream for StreamPart<'scope, 'env, SI, RI, E> {
     type Item = RI;
 
     fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -287,7 +287,7 @@ impl<'scope, 'env: 'scope, SI, RI, E> Stream for StreamPart<'scope, 'env, SI, RI
 }
 
 #[cfg(feature = "std")]
-impl<'scope, 'env: 'scope, SI, RI, E> Sink<Result<SI, E>> for SinkPart<'scope, 'env, SI, RI, E> {
+impl<'scope, 'env, SI, RI, E> Sink<Result<SI, E>> for SinkPart<'scope, 'env, SI, RI, E> {
     type Error = Infallible;
 
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -309,7 +309,7 @@ impl<'scope, 'env: 'scope, SI, RI, E> Sink<Result<SI, E>> for SinkPart<'scope, '
 }
 
 #[cfg(feature = "std")]
-impl<'scope, 'env: 'scope, SI, RI, E> Sink<SI> for SinkPart<'scope, 'env, SI, RI, E> {
+impl<'scope, 'env, SI, RI, E> Sink<SI> for SinkPart<'scope, 'env, SI, RI, E> {
     type Error = Infallible;
 
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -435,7 +435,7 @@ impl<'env, SI, RI, E> StreamSink<SI, RI> for LocalScopedStreamSink<'env, SI, RI,
     }
 }
 
-impl<'scope, 'env: 'scope, SI, RI, E> Stream for LocalStreamPart<'scope, 'env, SI, RI, E> {
+impl<'scope, 'env, SI, RI, E> Stream for LocalStreamPart<'scope, 'env, SI, RI, E> {
     type Item = RI;
 
     fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -443,9 +443,7 @@ impl<'scope, 'env: 'scope, SI, RI, E> Stream for LocalStreamPart<'scope, 'env, S
     }
 }
 
-impl<'scope, 'env: 'scope, SI, RI, E> Sink<Result<SI, E>>
-    for LocalSinkPart<'scope, 'env, SI, RI, E>
-{
+impl<'scope, 'env, SI, RI, E> Sink<Result<SI, E>> for LocalSinkPart<'scope, 'env, SI, RI, E> {
     type Error = Infallible;
 
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -466,7 +464,7 @@ impl<'scope, 'env: 'scope, SI, RI, E> Sink<Result<SI, E>>
     }
 }
 
-impl<'scope, 'env: 'scope, SI, RI, E> Sink<SI> for LocalSinkPart<'scope, 'env, SI, RI, E> {
+impl<'scope, 'env, SI, RI, E> Sink<SI> for LocalSinkPart<'scope, 'env, SI, RI, E> {
     type Error = Infallible;
 
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {

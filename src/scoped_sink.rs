@@ -327,7 +327,7 @@ impl<'env, T: 'env, E: 'env> Sink<T> for ScopedSink<'env, T, E> {
 }
 
 #[cfg(feature = "std")]
-impl<'scope, 'env: 'scope, T> Stream for SinkInner<'scope, 'env, T> {
+impl<'scope, 'env, T> Stream for SinkInner<'scope, 'env, T> {
     type Item = T;
 
     fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -502,7 +502,7 @@ impl<'env, T: 'env, E: 'env> Sink<T> for LocalScopedSink<'env, T, E> {
     }
 }
 
-impl<'scope, 'env: 'scope, T> Stream for LocalSinkInner<'scope, 'env, T> {
+impl<'scope, 'env, T> Stream for LocalSinkInner<'scope, 'env, T> {
     type Item = T;
 
     fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -751,6 +751,40 @@ mod tests {
             }
 
             println!("Closing");
+            sink.close().await?;
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_double_scoped() -> AnyResult<()> {
+        let mut sink: ScopedSink<usize, AnyError> = ScopedSink::new(|mut src| {
+            Box::pin(async move {
+                // Unfortunately, you can't use src inside inner sink yet
+                // (due to issues with lifetimes of captured values.
+                let mut sink2: ScopedSink<usize, AnyError> = ScopedSink::new(|mut src| {
+                    Box::pin(async move {
+                        println!("Value: {}", src.next().await.unwrap());
+                        Ok(())
+                    })
+                });
+
+                while let Some(v) = src.next().await {
+                    sink2.feed(v).await?;
+                    sink2.feed(v).await?;
+                }
+                sink2.close().await?;
+
+                Ok(())
+            })
+        });
+
+        test_helper(async move {
+            for i in 0..10 {
+                sink.feed(i).await?;
+            }
             sink.close().await?;
 
             Ok(())

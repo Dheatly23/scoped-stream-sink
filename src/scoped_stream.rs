@@ -329,7 +329,7 @@ impl<'env, T, E> Stream for ScopedTryStream<'env, T, E> {
 }
 
 #[cfg(feature = "std")]
-impl<'scope, 'env: 'scope, T> Sink<T> for StreamInner<'scope, 'env, T> {
+impl<'scope, 'env, T> Sink<T> for StreamInner<'scope, 'env, T> {
     type Error = Infallible;
 
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -351,7 +351,7 @@ impl<'scope, 'env: 'scope, T> Sink<T> for StreamInner<'scope, 'env, T> {
 }
 
 #[cfg(feature = "std")]
-impl<'scope, 'env: 'scope, T, E> Sink<Result<T, E>> for TryStreamInner<'scope, 'env, T, E> {
+impl<'scope, 'env, T, E> Sink<Result<T, E>> for TryStreamInner<'scope, 'env, T, E> {
     type Error = Infallible;
 
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
@@ -373,7 +373,7 @@ impl<'scope, 'env: 'scope, T, E> Sink<Result<T, E>> for TryStreamInner<'scope, '
 }
 
 #[cfg(feature = "std")]
-impl<'scope, 'env: 'scope, T, E> Sink<T> for TryStreamInner<'scope, 'env, T, E> {
+impl<'scope, 'env, T, E> Sink<T> for TryStreamInner<'scope, 'env, T, E> {
     type Error = Infallible;
 
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
@@ -576,7 +576,7 @@ impl<'env, T, E> Stream for LocalScopedTryStream<'env, T, E> {
     }
 }
 
-impl<'scope, 'env: 'scope, T> Sink<T> for LocalStreamInner<'scope, 'env, T> {
+impl<'scope, 'env, T> Sink<T> for LocalStreamInner<'scope, 'env, T> {
     type Error = Infallible;
 
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -597,7 +597,7 @@ impl<'scope, 'env: 'scope, T> Sink<T> for LocalStreamInner<'scope, 'env, T> {
     }
 }
 
-impl<'scope, 'env: 'scope, T, E> Sink<Result<T, E>> for LocalTryStreamInner<'scope, 'env, T, E> {
+impl<'scope, 'env, T, E> Sink<Result<T, E>> for LocalTryStreamInner<'scope, 'env, T, E> {
     type Error = Infallible;
 
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
@@ -618,7 +618,7 @@ impl<'scope, 'env: 'scope, T, E> Sink<Result<T, E>> for LocalTryStreamInner<'sco
     }
 }
 
-impl<'scope, 'env: 'scope, T, E> Sink<T> for LocalTryStreamInner<'scope, 'env, T, E> {
+impl<'scope, 'env, T, E> Sink<T> for LocalTryStreamInner<'scope, 'env, T, E> {
     type Error = Infallible;
 
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
@@ -648,7 +648,7 @@ mod tests {
     use std::time::Duration;
 
     use anyhow::{bail, Error as AnyError, Result as AnyResult};
-    use futures_util::{pending, SinkExt, StreamExt};
+    use futures_util::{join, pending, SinkExt, StreamExt};
     use tokio::task::yield_now;
     use tokio::time::timeout;
 
@@ -781,6 +781,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_double_scoped() -> AnyResult<()> {
+        let mut stream = <ScopedStream<usize>>::new(|mut sink| {
+            Box::pin(async move {
+                let mut stream2 = <ScopedStream<usize>>::new(|mut sink2| {
+                    let sink = &mut sink;
+                    Box::pin(async move {
+                        for i in 0..10 {
+                            sink.send(i + 100).await.unwrap();
+                            sink2.send(i).await.unwrap();
+                        }
+                    })
+                });
+
+                for i in 0..10 {
+                    assert_eq!(stream2.next().await, Some(i));
+                }
+                assert_eq!(stream2.next().await, None);
+            })
+        });
+
+        test_helper(async move {
+            for i in 0..10 {
+                assert_eq!(stream.next().await, Some(i + 100));
+            }
+            assert_eq!(stream.next().await, None);
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_double_scoped2() -> AnyResult<()> {
+        let mut stream = <ScopedStream<usize>>::new(|mut sink| {
+            Box::pin(async move {
+                let mut stream2 = <ScopedStream<usize>>::new(|mut sink2| {
+                    let sink = &mut sink;
+                    Box::pin(async move {
+                        for i in 0..10 {
+                            assert_eq!(join!(sink.send(i + 100), sink2.send(i)), (Ok(()), Ok(())));
+                        }
+                    })
+                });
+
+                for i in 0..10 {
+                    assert_eq!(stream2.next().await, Some(i));
+                }
+                assert_eq!(stream2.next().await, None);
+            })
+        });
+
+        test_helper(async move {
+            for i in 0..10 {
+                assert_eq!(stream.next().await, Some(i + 100));
+            }
+            assert_eq!(stream.next().await, None);
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
     async fn test_try_simple() -> AnyResult<()> {
         let mut stream = <ScopedTryStream<usize, AnyError>>::new(|_| Box::pin(async { Ok(()) }));
 
@@ -874,6 +937,136 @@ mod tests {
                 assert_eq!(stream.next().await.transpose()?, Some(i));
             }
             assert_eq!(stream.next().await.transpose()?, None);
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_try_double_scoped() -> AnyResult<()> {
+        let mut stream = <ScopedTryStream<usize, AnyError>>::new(|mut sink| {
+            Box::pin(async move {
+                let mut stream2 = <ScopedTryStream<usize, AnyError>>::new(|mut sink2| {
+                    let sink = &mut sink;
+                    Box::pin(async move {
+                        for i in 0..10 {
+                            sink.send(i + 100).await?;
+                            sink2.send(i).await?;
+                        }
+
+                        Ok(())
+                    })
+                });
+
+                for i in 0..10 {
+                    assert_eq!(stream2.next().await.transpose()?, Some(i));
+                }
+                assert_eq!(stream2.next().await.transpose()?, None);
+
+                Ok(())
+            })
+        });
+
+        test_helper(async move {
+            for i in 0..10 {
+                assert_eq!(stream.next().await.transpose()?, Some(i + 100));
+            }
+            assert_eq!(stream.next().await.transpose()?, None);
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_try_double_scoped2() -> AnyResult<()> {
+        let mut stream = <ScopedTryStream<usize, AnyError>>::new(|mut sink| {
+            Box::pin(async move {
+                let mut stream2 = <ScopedTryStream<usize, AnyError>>::new(|mut sink2| {
+                    let sink = &mut sink;
+                    Box::pin(async move {
+                        for i in 0..10 {
+                            let (r1, r2) = join!(sink.send(i + 100), sink2.send(i));
+                            r1?;
+                            r2?;
+                        }
+
+                        Ok(())
+                    })
+                });
+
+                for i in 0..10 {
+                    assert_eq!(stream2.next().await.transpose()?, Some(i));
+                }
+                assert_eq!(stream2.next().await.transpose()?, None);
+
+                Ok(())
+            })
+        });
+
+        test_helper(async move {
+            for i in 0..10 {
+                assert_eq!(stream.next().await.transpose()?, Some(i + 100));
+            }
+            assert_eq!(stream.next().await.transpose()?, None);
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_try_fail() -> AnyResult<()> {
+        let mut stream = <ScopedTryStream<usize, usize>>::new(|mut sink| {
+            Box::pin(async move {
+                for i in 0..10 {
+                    sink.send(Ok(i)).await.unwrap();
+                }
+
+                Err(500)
+            })
+        });
+
+        test_helper(async move {
+            for i in 0..10 {
+                assert_eq!(stream.next().await, Some(Ok(i)));
+            }
+            assert_eq!(stream.next().await, Some(Err(500)));
+            assert_eq!(stream.next().await, None);
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_try_fail2() -> AnyResult<()> {
+        let mut stream = <ScopedTryStream<usize, usize>>::new(|mut sink| {
+            Box::pin(async move {
+                for i in 0..10 {
+                    sink.send(Ok(i)).await.unwrap();
+                }
+
+                for i in 0..10 {
+                    sink.send(Err(i)).await.unwrap();
+                }
+
+                Err(500)
+            })
+        });
+
+        test_helper(async move {
+            for i in 0..10 {
+                assert_eq!(stream.next().await, Some(Ok(i)));
+            }
+
+            for i in 0..10 {
+                assert_eq!(stream.next().await, Some(Err(i)));
+            }
+
+            assert_eq!(stream.next().await, Some(Err(500)));
+            assert_eq!(stream.next().await, None);
 
             Ok(())
         })
