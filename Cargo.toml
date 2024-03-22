@@ -26,6 +26,7 @@ optional = true
 
 [dev-dependencies]
 anyhow = "1"
+num-integer = "0.1"
 
 [dependencies.futures-util]
 version = "0.3"

@@ -520,6 +520,9 @@ mod tests {
 
     use anyhow::{bail, Error as AnyError, Result as AnyResult};
     use futures_util::{SinkExt, StreamExt};
+    use num_integer::Roots as _;
+    use tokio::spawn;
+    use tokio::sync::mpsc::channel;
     use tokio::task::yield_now;
     use tokio::time::timeout;
 
@@ -790,5 +793,79 @@ mod tests {
             Ok(())
         })
         .await
+    }
+
+    #[tokio::test]
+    async fn test_spawn_mpsc() -> AnyResult<()> {
+        fn is_prime(v: u64) -> bool {
+            (2..v.sqrt()).all(|i| v % i != 0)
+        }
+
+        let (s1, mut r1) = channel::<u64>(4);
+        let (s2, mut r2) = channel::<u64>(4);
+
+        let mut sink = ScopedSink::new(move |mut stream| {
+            let s1 = s1.clone();
+            let s2 = s2.clone();
+
+            Box::pin(async move {
+                let Some(v) = stream.next().await else {
+                    return Ok(());
+                };
+
+                if is_prime(v) {
+                    s1.send(v).await
+                } else {
+                    s2.send(v).await
+                }
+            })
+        });
+
+        let mut handles = Vec::new();
+
+        handles.push(spawn(test_helper(async move {
+            while let Some(v) = r1.recv().await {
+                assert!(is_prime(v));
+                for _ in 0..v.sqrt() {
+                    yield_now().await
+                }
+            }
+
+            Ok(())
+        })));
+
+        handles.push(spawn(test_helper(async move {
+            while let Some(v) = r2.recv().await {
+                assert!(!is_prime(v));
+                for _ in 0..v.sqrt() {
+                    yield_now().await
+                }
+            }
+
+            Ok(())
+        })));
+
+        handles.push(spawn(test_helper(async move {
+            for i in 1..1000 {
+                sink.feed(i).await?;
+            }
+            sink.close().await?;
+
+            Ok(())
+        })));
+
+        let mut has_error = false;
+        for f in handles {
+            if let Err(e) = f.await? {
+                eprintln!("{e:?}");
+                has_error = true;
+            }
+        }
+
+        if has_error {
+            bail!("Some error has happened");
+        }
+
+        Ok(())
     }
 }

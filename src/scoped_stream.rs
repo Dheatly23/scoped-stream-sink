@@ -649,8 +649,10 @@ mod tests {
 
     use anyhow::{bail, Error as AnyError, Result as AnyResult};
     use futures_util::{join, pending, SinkExt, StreamExt};
+    use tokio::sync::mpsc::channel;
     use tokio::task::yield_now;
     use tokio::time::timeout;
+    use tokio::{select, spawn};
 
     async fn test_helper<F>(f: F) -> AnyResult<()>
     where
@@ -1071,6 +1073,74 @@ mod tests {
             Ok(())
         })
         .await
+    }
+
+    #[tokio::test]
+    async fn test_spawn_mpsc() -> AnyResult<()> {
+        let (s1, mut r1) = channel::<(usize, usize)>(4);
+        let (s2, mut r2) = channel::<(usize, usize)>(4);
+
+        let mut stream = ScopedStream::new(|mut sink| {
+            Box::pin(async move {
+                loop {
+                    let r;
+                    select! {
+                        Some(v) = r1.recv() => r = v,
+                        Some(v) = r2.recv() => r = v,
+                        else => return,
+                    }
+
+                    println!("Received: {r:?}");
+                    sink.feed(r).await.unwrap();
+                }
+            })
+        });
+
+        let it = [0..10, 5..20, 10..100, 25..100, 50..75];
+        let mut handles = Vec::new();
+
+        let mut it_ = it.clone();
+        handles.push(spawn(test_helper(async move {
+            while let Some((i, v)) = stream.next().await {
+                assert_eq!(it_[i].next(), Some(v));
+            }
+
+            for mut v in it_ {
+                assert_eq!(v.next(), None);
+            }
+
+            Ok(())
+        })));
+
+        for (i, v) in it.into_iter().enumerate() {
+            let s = if i % 2 == 0 { s1.clone() } else { s2.clone() };
+            handles.push(spawn(test_helper(async move {
+                for j in v {
+                    s.send((i, j)).await.unwrap();
+
+                    for _ in 0..i {
+                        yield_now().await
+                    }
+                }
+
+                Ok(())
+            })));
+        }
+        drop((s1, s2));
+
+        let mut has_error = false;
+        for f in handles {
+            if let Err(e) = f.await? {
+                eprintln!("{e:?}");
+                has_error = true;
+            }
+        }
+
+        if has_error {
+            bail!("Some error has happened");
+        }
+
+        Ok(())
     }
 
     fn nil_waker() -> Waker {
