@@ -201,7 +201,9 @@ pub use crate::scoped_stream_sink::*;
 pub use crate::stream_sink::*;
 pub use crate::stream_sink_ext::*;
 
+#[doc(no_inline)]
 pub use futures_core::Stream;
+#[doc(no_inline)]
 pub use futures_sink::Sink;
 
 pub(crate) mod sealed {
@@ -214,11 +216,14 @@ pub mod prelude {
         StreamSink as _, StreamSinkExt as _,
     };
 
+    #[doc(no_inline)]
     pub use futures_core::Stream as _;
+    #[doc(no_inline)]
     pub use futures_sink::Sink as _;
 
     #[cfg(feature = "std")]
     pub use crate::{ScopedSink, ScopedStream, ScopedStreamSink, ScopedTryStream};
+    #[doc(no_inline)]
     #[cfg(feature = "std")]
     pub use futures_util::{SinkExt as _, StreamExt as _};
 }
