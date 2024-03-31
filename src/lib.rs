@@ -204,9 +204,11 @@ pub use crate::stream_sink_ext::*;
 pub use futures_core::Stream;
 pub use futures_sink::Sink;
 
+/* Let's comment out this until ready
 pub(crate) mod sealed {
     pub(crate) trait Sealed {}
 }
+*/
 
 pub mod prelude {
     pub use crate::{
