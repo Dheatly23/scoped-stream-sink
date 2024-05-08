@@ -1,3 +1,4 @@
+use alloc::boxed::Box;
 use core::future::Future;
 use core::marker::{PhantomData, PhantomPinned};
 use core::ops::DerefMut;
@@ -514,6 +515,7 @@ impl<'scope, 'env, T> Stream for LocalSinkInner<'scope, 'env, T> {
 mod tests {
     use super::*;
 
+    use std::prelude::rust_2021::*;
     use std::sync::atomic::{AtomicU8, Ordering};
     use std::sync::Arc;
     use std::time::Duration;

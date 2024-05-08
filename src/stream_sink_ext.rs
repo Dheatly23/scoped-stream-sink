@@ -891,6 +891,7 @@ mod tests {
     use crate::ScopedStreamSink;
 
     use std::pin::pin;
+    use std::prelude::rust_2021::*;
     use std::time::Duration;
 
     use anyhow::{bail, Error as AnyError, Result as AnyResult};
