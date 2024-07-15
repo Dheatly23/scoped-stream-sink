@@ -1,3 +1,4 @@
+use alloc::boxed::Box;
 use core::convert::Infallible;
 use core::future::Future;
 use core::marker::{PhantomData, PhantomPinned};
@@ -643,6 +644,7 @@ mod tests {
     use super::*;
 
     use std::pin::pin;
+    use std::prelude::rust_2021::*;
     use std::ptr::NonNull;
     use std::task::{Context, RawWaker, RawWakerVTable, Waker};
     use std::time::Duration;

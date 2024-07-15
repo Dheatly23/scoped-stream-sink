@@ -1,3 +1,4 @@
+#![no_std]
 #![allow(clippy::type_complexity)]
 
 //! Make asynchronous [`Stream`] and [`Sink`] easy.
@@ -23,6 +24,7 @@
 //!
 //! Currently, this crate requires `alloc` (because of [`Box`] and such).
 //! But it's perfectly usable on platforms like WASM.
+//! Do note that the default `std` feature requires stdlib and so is incompatible with `no-std`.
 //!
 //! # Examples
 //!
@@ -179,21 +181,18 @@
 //! }
 //! ```
 
+extern crate alloc;
+#[cfg(any(feature = "std", test))]
+#[macro_use]
+extern crate std;
+
+#[cfg(feature = "std")]
+mod local_thread;
 mod scoped_sink;
 mod scoped_stream;
 mod scoped_stream_sink;
 mod stream_sink;
 mod stream_sink_ext;
-
-#[cfg(all(feature = "std", debug_assertions))]
-use std::thread::{current, ThreadId};
-#[cfg(feature = "std")]
-use std::{
-    marker::PhantomData,
-    ops::{Deref, DerefMut},
-    ptr::NonNull,
-    sync::atomic::{AtomicU8, Ordering},
-};
 
 pub use crate::scoped_sink::*;
 pub use crate::scoped_stream::*;
@@ -201,8 +200,13 @@ pub use crate::scoped_stream_sink::*;
 pub use crate::stream_sink::*;
 pub use crate::stream_sink_ext::*;
 
+#[doc(no_inline)]
 pub use futures_core::Stream;
+#[doc(no_inline)]
 pub use futures_sink::Sink;
+
+#[cfg(feature = "std")]
+pub(crate) use local_thread::*;
 
 /* Let's comment out this until ready
 pub(crate) mod sealed {
@@ -216,169 +220,14 @@ pub mod prelude {
         StreamSink as _, StreamSinkExt as _,
     };
 
+    #[doc(no_inline)]
     pub use futures_core::Stream as _;
+    #[doc(no_inline)]
     pub use futures_sink::Sink as _;
 
     #[cfg(feature = "std")]
     pub use crate::{ScopedSink, ScopedStream, ScopedStreamSink, ScopedTryStream};
+    #[doc(no_inline)]
     #[cfg(feature = "std")]
     pub use futures_util::{SinkExt as _, StreamExt as _};
-}
-
-#[cfg(feature = "std")]
-const STATE_OFF: u8 = 0;
-#[cfg(feature = "std")]
-const STATE_ENTER: u8 = 1;
-#[cfg(feature = "std")]
-const STATE_LOCKED: u8 = 2;
-
-#[cfg(feature = "std")]
-/// Protects value within local thread. Call [`Self::get_inner()`] to protect inner access
-/// to within thread. Call [`Self::set_inner_ctx()`] to set the context.
-pub(crate) struct LocalThread<T> {
-    #[cfg(debug_assertions)]
-    thread: ThreadId,
-    lock: AtomicU8,
-
-    inner: T,
-}
-
-#[cfg(feature = "std")]
-fn panic_expected(expect: u8, value: u8) {
-    panic!("Inconsistent internal state! (expected lock state to be {:02X}, got {:02X})\nNote: Your code might use inner value across thread", expect, value);
-}
-
-#[cfg(feature = "std")]
-/// Guard for inner context.
-pub(crate) struct LocalThreadInnerGuard<'a, T> {
-    ptr: NonNull<LocalThread<T>>,
-    phantom: PhantomData<&'a LocalThread<T>>,
-}
-
-#[cfg(feature = "std")]
-impl<'a, T> Drop for LocalThreadInnerGuard<'a, T> {
-    fn drop(&mut self) {
-        // SAFETY: Pointer is valid.
-        let p = unsafe { self.ptr.as_ref() };
-        if let Err(v) = p.lock.compare_exchange(
-            STATE_LOCKED,
-            STATE_ENTER,
-            Ordering::Release,
-            Ordering::Relaxed,
-        ) {
-            panic_expected(STATE_LOCKED, v);
-        }
-    }
-}
-
-#[cfg(feature = "std")]
-impl<'a, T> Deref for LocalThreadInnerGuard<'a, T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        // SAFETY: It is locked.
-        unsafe { &self.ptr.as_ref().inner }
-    }
-}
-
-#[cfg(feature = "std")]
-impl<'a, T> DerefMut for LocalThreadInnerGuard<'a, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        // SAFETY: It is locked.
-        unsafe { &mut self.ptr.as_mut().inner }
-    }
-}
-
-#[cfg(feature = "std")]
-/// Guard for outer context.
-pub(crate) struct LocalThreadInnerCtxGuard<'a, T> {
-    ptr: NonNull<LocalThread<T>>,
-    phantom: PhantomData<&'a LocalThread<T>>,
-}
-
-#[cfg(feature = "std")]
-impl<'a, T> Drop for LocalThreadInnerCtxGuard<'a, T> {
-    fn drop(&mut self) {
-        // SAFETY: Pointer is valid.
-        let p = unsafe { self.ptr.as_ref() };
-        if let Err(v) =
-            p.lock
-                .compare_exchange(STATE_ENTER, STATE_OFF, Ordering::Release, Ordering::Relaxed)
-        {
-            panic_expected(STATE_ENTER, v);
-        }
-    }
-}
-
-#[cfg(feature = "std")]
-impl<'a, T> Deref for LocalThreadInnerCtxGuard<'a, T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        // SAFETY: It is locked.
-        unsafe { &self.ptr.as_ref().inner }
-    }
-}
-
-#[cfg(feature = "std")]
-impl<'a, T> DerefMut for LocalThreadInnerCtxGuard<'a, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        // SAFETY: It is locked.
-        unsafe { &mut self.ptr.as_mut().inner }
-    }
-}
-
-#[cfg(feature = "std")]
-impl<T> LocalThread<T> {
-    pub(crate) fn new(inner: T) -> Self {
-        Self {
-            #[cfg(debug_assertions)]
-            thread: current().id(),
-            lock: AtomicU8::new(STATE_OFF),
-
-            inner,
-        }
-    }
-
-    /// Enters inner context.
-    pub(crate) fn get_inner(&self) -> LocalThreadInnerGuard<'_, T> {
-        if let Err(v) = self.lock.compare_exchange(
-            STATE_ENTER,
-            STATE_LOCKED,
-            Ordering::SeqCst,
-            Ordering::Relaxed,
-        ) {
-            panic_expected(STATE_ENTER, v);
-        }
-
-        #[cfg(debug_assertions)]
-        if self.thread != current().id() {
-            panic!("Called from other thread!");
-        }
-
-        LocalThreadInnerGuard {
-            ptr: self.into(),
-            phantom: PhantomData,
-        }
-    }
-
-    /// Enters outer context.
-    pub(crate) fn set_inner_ctx(&mut self) -> LocalThreadInnerCtxGuard<'_, T> {
-        if let Err(v) =
-            self.lock
-                .compare_exchange(STATE_OFF, STATE_ENTER, Ordering::SeqCst, Ordering::Relaxed)
-        {
-            panic_expected(STATE_OFF, v);
-        }
-
-        #[cfg(debug_assertions)]
-        {
-            self.thread = current().id();
-        }
-
-        LocalThreadInnerCtxGuard {
-            ptr: self.into(),
-            phantom: PhantomData,
-        }
-    }
 }

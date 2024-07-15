@@ -1,3 +1,4 @@
+use alloc::boxed::Box;
 use core::convert::Infallible;
 use core::future::Future;
 use core::marker::{PhantomData, PhantomPinned};
