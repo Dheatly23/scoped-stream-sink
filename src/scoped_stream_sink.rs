@@ -1,4 +1,5 @@
 use alloc::boxed::Box;
+use core::cell::{Cell, UnsafeCell};
 use core::convert::Infallible;
 use core::future::Future;
 use core::marker::{PhantomData, PhantomPinned};
@@ -26,10 +27,23 @@ pin_project! {
 }
 
 struct StreamSinkInnerData<SI, RI, E> {
-    send: Option<Result<SI, E>>,
-    recv: Option<RI>,
-    close_send: bool,
-    close_recv: bool,
+    send: UnsafeCell<Option<Result<SI, E>>>,
+    recv: UnsafeCell<Option<RI>>,
+    close_send: Cell<bool>,
+    close_recv: Cell<bool>,
+}
+
+unsafe impl<SI: Sync, RI: Sync, E: Sync> Sync for StreamSinkInnerData<SI, RI, E> {}
+
+impl<SI, RI, E> StreamSinkInnerData<SI, RI, E> {
+    const fn new() -> Self {
+        StreamSinkInnerData {
+            send: UnsafeCell::new(None),
+            recv: UnsafeCell::new(None),
+            close_send: Cell::new(false),
+            close_recv: Cell::new(false),
+        }
+    }
 }
 
 #[cfg(feature = "std")]
@@ -98,12 +112,7 @@ impl<'env, SI, RI, E> ScopedStreamSink<'env, SI, RI, E> {
             -> Pin<Box<dyn Future<Output = Result<(), E>> + Send + 'scope>>,
     {
         let mut data = Box::pin(StreamSinkInner {
-            inner: LocalThread::new(StreamSinkInnerData {
-                send: None,
-                recv: None,
-                close_send: false,
-                close_recv: false,
-            }),
+            inner: LocalThread::new(StreamSinkInnerData::new()),
 
             pinned: PhantomPinned,
             phantom: PhantomData,
@@ -130,7 +139,7 @@ impl<'env, SI, RI, E> ScopedStreamSink<'env, SI, RI, E> {
 }
 
 impl<SI, RI, E> StreamSinkInnerData<SI, RI, E> {
-    fn stream_sink<F>(&mut self, cx: &mut Context<'_>, fut: &mut Option<Pin<F>>) -> State<SI, E>
+    fn stream_sink<F>(&self, cx: &mut Context<'_>, fut: &mut Option<Pin<F>>) -> State<SI, E>
     where
         F: DerefMut,
         F::Target: Future<Output = Result<(), E>>,
@@ -142,15 +151,20 @@ impl<SI, RI, E> StreamSinkInnerData<SI, RI, E> {
 
         if let Poll::Ready(v) = ret {
             *fut = None;
-            self.close_send = true;
-            self.close_recv = true;
+            self.close_send.set(true);
+            self.close_recv.set(true);
 
             if let Err(e) = v {
                 return State::Error(e);
             }
         }
 
-        match (self.send.take(), !self.close_recv && self.recv.is_none()) {
+        match unsafe {
+            (
+                (*self.send.get()).take(),
+                !self.close_recv.get() && (*self.recv.get()).is_none(),
+            )
+        } {
             (Some(Err(e)), _) => State::Error(e),
             (Some(Ok(i)), true) => State::SendRecvReady(i),
             (Some(Ok(i)), false) => State::SendReady(i),
@@ -160,19 +174,20 @@ impl<SI, RI, E> StreamSinkInnerData<SI, RI, E> {
         }
     }
 
-    fn send_outer(&mut self, item: RI) {
-        if self.close_recv {
+    fn send_outer(&self, item: RI) {
+        if self.close_recv.get() {
             panic!("ScopedStreamSink is closed!");
         }
-        if self.recv.is_some() {
+        let recv = unsafe { &mut *self.recv.get() };
+        if recv.is_some() {
             panic!("ScopedStreamSink is not ready to receive!");
         }
 
-        self.recv = Some(item);
+        *recv = Some(item);
     }
 
     fn close_outer<F>(
-        &mut self,
+        &self,
         cx: &mut Context<'_>,
         fut: &mut Option<Pin<F>>,
     ) -> Poll<Result<Option<SI>, E>>
@@ -180,7 +195,7 @@ impl<SI, RI, E> StreamSinkInnerData<SI, RI, E> {
         F: DerefMut,
         F::Target: Future<Output = Result<(), E>>,
     {
-        self.close_recv = true;
+        self.close_recv.set(true);
         let ret = match fut {
             Some(f) => f.as_mut().poll(cx),
             None => Poll::Ready(Ok(())),
@@ -194,7 +209,7 @@ impl<SI, RI, E> StreamSinkInnerData<SI, RI, E> {
             }
         }
 
-        let ret = self.send.take();
+        let ret = unsafe { (*self.send.get()).take() };
         if ret.is_none() && fut.is_some() {
             Poll::Pending
         } else {
@@ -202,36 +217,37 @@ impl<SI, RI, E> StreamSinkInnerData<SI, RI, E> {
         }
     }
 
-    fn next(&mut self) -> Poll<Option<RI>> {
-        match self.recv.take() {
+    fn next(&self) -> Poll<Option<RI>> {
+        match unsafe { (*self.recv.get()).take() } {
             v @ Some(_) => Poll::Ready(v),
-            None if self.close_recv => Poll::Ready(None),
+            None if self.close_recv.get() => Poll::Ready(None),
             None => Poll::Pending,
         }
     }
 
-    fn flush<E2>(&mut self) -> Poll<Result<(), E2>> {
-        if !self.close_send && self.send.is_none() {
+    fn flush<E2>(&self) -> Poll<Result<(), E2>> {
+        if !self.close_send.get() && unsafe { (*self.send.get()).is_none() } {
             Poll::Ready(Ok(()))
         } else {
             Poll::Pending
         }
     }
 
-    fn send_inner(&mut self, item: Result<SI, E>) {
-        if self.close_send {
+    fn send_inner(&self, item: Result<SI, E>) {
+        if self.close_send.get() {
             panic!("ScopedStreamSink is closed!");
         }
-        if self.send.is_some() {
+        let send = unsafe { &mut *self.send.get() };
+        if send.is_some() {
             panic!("poll_ready() is not called first!");
         }
 
-        self.send = Some(item);
+        *send = Some(item);
     }
 
-    fn close_inner<E2>(&mut self) -> Poll<Result<(), E2>> {
-        self.close_send = true;
-        if self.send.is_none() {
+    fn close_inner<E2>(&self) -> Poll<Result<(), E2>> {
+        self.close_send.set(true);
+        if unsafe { (*self.send.get()).is_none() } {
             Poll::Ready(Ok(()))
         } else {
             Poll::Pending
@@ -378,12 +394,7 @@ impl<'env, SI, RI, E> LocalScopedStreamSink<'env, SI, RI, E> {
         ) -> Pin<Box<dyn Future<Output = Result<(), E>> + 'scope>>,
     {
         let mut data = Box::pin(LocalStreamSinkInner {
-            inner: StreamSinkInnerData {
-                send: None,
-                recv: None,
-                close_send: false,
-                close_recv: false,
-            },
+            inner: StreamSinkInnerData::new(),
 
             pinned: PhantomPinned,
             phantom: PhantomData,

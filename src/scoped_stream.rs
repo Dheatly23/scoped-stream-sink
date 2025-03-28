@@ -1,4 +1,5 @@
 use alloc::boxed::Box;
+use core::cell::{Cell, UnsafeCell};
 use core::convert::Infallible;
 use core::future::Future;
 use core::marker::{PhantomData, PhantomPinned};
@@ -50,8 +51,19 @@ pin_project! {
 }
 
 struct StreamInnerData<T> {
-    data: Option<T>,
-    closed: bool,
+    data: UnsafeCell<Option<T>>,
+    closed: Cell<bool>,
+}
+
+unsafe impl<T: Sync> Sync for StreamInnerData<T> {}
+
+impl<T> StreamInnerData<T> {
+    const fn new() -> Self {
+        Self {
+            data: UnsafeCell::new(None),
+            closed: Cell::new(false),
+        }
+    }
 }
 
 #[cfg(feature = "std")]
@@ -141,10 +153,7 @@ impl<'env, T> ScopedStream<'env, T> {
         ) -> Pin<Box<dyn Future<Output = ()> + Send + 'scope>>,
     {
         let mut data = Box::pin(StreamInner {
-            inner: LocalThread::new(StreamInnerData {
-                data: None,
-                closed: false,
-            }),
+            inner: LocalThread::new(StreamInnerData::new()),
 
             pinned: PhantomPinned,
             phantom: PhantomData,
@@ -199,10 +208,7 @@ impl<'env, T, E> ScopedTryStream<'env, T, E> {
             -> Pin<Box<dyn Future<Output = Result<(), E>> + Send + 'scope>>,
     {
         let mut data = Box::pin(TryStreamInner {
-            inner: LocalThread::new(StreamInnerData {
-                data: None,
-                closed: false,
-            }),
+            inner: LocalThread::new(StreamInnerData::new()),
 
             pinned: PhantomPinned,
             phantom: PhantomData,
@@ -220,7 +226,7 @@ impl<'env, T, E> ScopedTryStream<'env, T, E> {
 
 impl<T, E> StreamInnerData<Result<T, E>> {
     fn next_fallible<U>(
-        &mut self,
+        &self,
         cx: &mut Context<'_>,
         fut: &mut Option<Pin<U>>,
     ) -> Poll<Option<Result<T, E>>>
@@ -240,7 +246,7 @@ impl<T, E> StreamInnerData<Result<T, E>> {
             }
         }
 
-        let ret = self.data.take();
+        let ret = unsafe { (*self.data.get()).take() };
         if ret.is_none() && res.is_pending() {
             Poll::Pending
         } else {
@@ -250,7 +256,7 @@ impl<T, E> StreamInnerData<Result<T, E>> {
 }
 
 impl<T> StreamInnerData<T> {
-    fn next<F>(&mut self, cx: &mut Context<'_>, fut: &mut Option<Pin<F>>) -> Poll<Option<T>>
+    fn next<F>(&self, cx: &mut Context<'_>, fut: &mut Option<Pin<F>>) -> Poll<Option<T>>
     where
         F: DerefMut,
         F::Target: Future<Output = ()>,
@@ -263,7 +269,7 @@ impl<T> StreamInnerData<T> {
             *fut = None;
         }
 
-        let ret = self.data.take();
+        let ret = unsafe { (*self.data.get()).take() };
         if ret.is_none() && res.is_pending() {
             Poll::Pending
         } else {
@@ -271,30 +277,33 @@ impl<T> StreamInnerData<T> {
         }
     }
 
-    fn flush<E>(&mut self) -> Poll<Result<(), E>> {
-        if self.closed || self.data.is_some() {
+    fn flush<E>(&self) -> Poll<Result<(), E>> {
+        if self.closed.get() || unsafe { (*self.data.get()).is_some() } {
             Poll::Pending
         } else {
             Poll::Ready(Ok(()))
         }
     }
 
-    fn send(&mut self, item: T) {
-        if self.closed {
+    fn send(&self, item: T) {
+        if self.closed.get() {
             panic!("Stream is closed");
         }
-        if self.data.is_some() {
+        let data = unsafe { &mut *self.data.get() };
+        if data.is_some() {
             panic!("poll_ready() is not called yet!");
         }
 
-        self.data = Some(item);
+        *data = Some(item);
     }
 
-    fn close<E>(&mut self) -> Poll<Result<(), E>> {
-        self.closed = true;
-        match self.data {
-            Some(_) => Poll::Pending,
-            None => Poll::Ready(Ok(())),
+    fn close<E>(&self) -> Poll<Result<(), E>> {
+        self.closed.set(true);
+
+        if unsafe { (*self.data.get()).is_some() } {
+            Poll::Pending
+        } else {
+            Poll::Ready(Ok(()))
         }
     }
 }
@@ -480,10 +489,7 @@ impl<'env, T> LocalScopedStream<'env, T> {
         ) -> Pin<Box<dyn Future<Output = ()> + 'scope>>,
     {
         let mut data = Box::pin(LocalStreamInner {
-            inner: StreamInnerData {
-                data: None,
-                closed: false,
-            },
+            inner: StreamInnerData::new(),
 
             pinned: PhantomPinned,
             phantom: PhantomData,
@@ -536,10 +542,7 @@ impl<'env, T, E> LocalScopedTryStream<'env, T, E> {
         ) -> Pin<Box<dyn Future<Output = Result<(), E>> + 'scope>>,
     {
         let mut data = Box::pin(LocalTryStreamInner {
-            inner: StreamInnerData {
-                data: None,
-                closed: false,
-            },
+            inner: StreamInnerData::new(),
 
             pinned: PhantomPinned,
             phantom: PhantomData,
