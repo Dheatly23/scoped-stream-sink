@@ -79,6 +79,7 @@ pin_project! {
     ///
     /// Also do note that some of the check depends on `debug_assertions` build config
     /// (AKA only on debug builds).
+    #[must_use = "SinkInner will not do anything if not used"]
     pub struct SinkInner<'scope, 'env: 'scope, T> {
         inner: LocalThread<SinkInnerData<T>>,
 

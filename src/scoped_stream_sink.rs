@@ -18,6 +18,7 @@ use crate::{State, StreamSink};
 #[cfg(feature = "std")]
 pin_project! {
     /// Scoped version of [`StreamSink`]. Makes building [`StreamSink`] much easier to do.
+    #[must_use = "StreamSink will not do anything if not used"]
     pub struct ScopedStreamSink<'env, SI, RI, E> {
         fut: Option<Pin<Box<dyn Future<Output = Result<(), E>> + Send + 'env>>>,
 
@@ -59,6 +60,7 @@ pin_project! {
     ///
     /// Also do note that some of the check depends on `debug_assertions` build config
     /// (AKA only on debug builds).
+    #[must_use = "Stream will not do anything if not used"]
     pub struct StreamPart<'scope, 'env: 'scope, SI, RI, E> {
         ptr: Pin<&'scope mut StreamSinkInner<'scope, 'env, SI, RI, E>>,
     }
@@ -80,6 +82,7 @@ pin_project! {
     ///
     /// Also do note that some of the check depends on `debug_assertions` build config
     /// (AKA only on debug builds).
+    #[must_use = "Sink will not do anything if not used"]
     pub struct SinkPart<'scope, 'env: 'scope, SI, RI, E> {
         ptr: Pin<&'scope mut StreamSinkInner<'scope, 'env, SI, RI, E>>,
     }
@@ -332,6 +335,7 @@ impl<'scope, 'env, SI, RI, E> Sink<SI> for SinkPart<'scope, 'env, SI, RI, E> {
 
 pin_project! {
     /// Locally scoped version of [`StreamSink`]. Does not implement [`Send`].
+    #[must_use = "StreamSink will not do anything if not used"]
     pub struct LocalScopedStreamSink<'env, SI, RI, E> {
         fut: Option<Pin<Box<dyn Future<Output = Result<(), E>> + 'env>>>,
 
@@ -353,6 +357,7 @@ pin_project! {
     /// [`Stream`] half of inner [`LocalScopedStreamSink`].
     /// Produce receive type values.
     /// Can only be closed from it's outer [`LocalScopedStreamSink`].
+    #[must_use = "Stream will not do anything if not used"]
     pub struct LocalStreamPart<'scope, 'env: 'scope, SI, RI, E> {
         ptr: Pin<&'scope mut LocalStreamSinkInner<'scope, 'env, SI, RI, E>>,
     }
@@ -362,6 +367,7 @@ pin_project! {
     /// [`Sink`] half of inner [`LocalScopedStreamSink`].
     /// Can receive both send type or a [`Result`] type.
     /// Closing will complete when outer [`LocalScopedStreamSink`] is closed and received all data.
+    #[must_use = "Sink will not do anything if not used"]
     pub struct LocalSinkPart<'scope, 'env: 'scope, SI, RI, E> {
         ptr: Pin<&'scope mut LocalStreamSinkInner<'scope, 'env, SI, RI, E>>,
     }

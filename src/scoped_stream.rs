@@ -28,6 +28,7 @@ pin_project! {
     /// (like [`async_stream`](https://docs.rs/async-stream/latest/async_stream/)).
     /// Safety is guaranteed by carefully scoping [`StreamInner`],
     /// similiar to [`scope`](std::thread::scope).
+    #[must_use = "Stream will not do anything if not used"]
     pub struct ScopedStream<'env, T> {
         fut: Option<DynStreamFut<'env>>,
 
@@ -42,6 +43,7 @@ pin_project! {
     /// Similiar to [`ScopedStream`], but allows for an error type. Future inside may fail,
     /// unlike [`ScopedStream`]. Also, the inner [`TryStreamInner`] allows for either sending
     /// an item or [`Result`] type.
+    #[must_use = "Stream will not do anything if not used"]
     pub struct ScopedTryStream<'env, T, E> {
         fut: Option<DynTryStreamFut<'env, E>>,
 
@@ -70,6 +72,7 @@ pin_project! {
     ///
     /// Also do note that some of the check depends on `debug_assertions` build config
     /// (AKA only on debug builds).
+    #[must_use = "StreamInner will not do anything if not used"]
     pub struct StreamInner<'scope, 'env: 'scope, T> {
         inner: LocalThread<StreamInnerData<T>>,
 
@@ -96,6 +99,7 @@ pin_project! {
     ///
     /// Also do note that some of the check depends on `debug_assertions` build config
     /// (AKA only on debug builds).
+    #[must_use = "StreamInner will not do anything if not used"]
     pub struct TryStreamInner<'scope, 'env: 'scope, T, E> {
         inner: LocalThread<StreamInnerData<Result<T, E>>>,
 
@@ -401,6 +405,7 @@ pin_project! {
     /// Local stream with a scoped future.
     ///
     /// Unlike [`ScopedStream`] it is not [`Send`], so it can work in no-std environment.
+    #[must_use = "Stream will not do anything if not used"]
     pub struct LocalScopedStream<'env, T> {
         fut: Option<DynLocalStreamFut<'env>>,
 
@@ -412,6 +417,7 @@ pin_project! {
     /// Local stream with a scoped future.
     ///
     /// Unlike [`ScopedTryStream`] it is not [`Send`], so it can work in no-std environment.
+    #[must_use = "Stream will not do anything if not used"]
     pub struct LocalScopedTryStream<'env, T, E> {
         fut: Option<DynLocalTryStreamFut<'env, E>>,
 
@@ -423,6 +429,7 @@ pin_project! {
     /// Inner type of [`LocalScopedStream`].
     ///
     /// Similiar to [`StreamInner`], but not [`Send`].
+    #[must_use = "StreamInner will not do anything if not used"]
     pub struct LocalStreamInner<'scope, 'env: 'scope, T> {
         inner: StreamInnerData<T>,
 
@@ -436,6 +443,7 @@ pin_project! {
     /// Inner type of [`LocalScopedTryStream`].
     ///
     /// Similiar to [`TryStreamInner`], but not [`Send`].
+    #[must_use = "StreamInner will not do anything if not used"]
     pub struct LocalTryStreamInner<'scope, 'env: 'scope, T, E> {
         inner: StreamInnerData<Result<T, E>>,
 
