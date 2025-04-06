@@ -12,17 +12,17 @@
 //! ## 📌 Plan for 2.0
 //!
 //! Since AFIT (and RPITIT) is stabilized, i plan to upgrade this library's interface to use them.
-//! This _should_ eliminate the [`Box::pin`] requirement, at the cost of complicated type bounds
+//! This _should_ eliminate the [`Box::pin`](alloc::boxed::Box::pin) requirement, at the cost of complicated type bounds
 //! (and harder to use too, maybe).
 //! So far i've been unsuccessful to fully reason the type bounds.
 //!
 //! So here are the (rough) plan for (possible) 2.0:
-//! - Eliminate [`Box::pin`] requirement (maybe add type alias for dynamic version).
+//! - Eliminate [`Box::pin`](alloc::boxed::Box::pin) requirement (maybe add type alias for dynamic version).
 //! - Beef up [`StreamSink`] functionality (right now it's kinda experimental).
 //!
 //! ## `no-std` Support
 //!
-//! Currently, this crate requires `alloc` (because of [`Box`] and such).
+//! Currently, this crate requires `alloc` (because of [`Box`](alloc::boxed::Box) and such).
 //! But it's perfectly usable on platforms like WASM.
 //! Do note that the default `std` feature requires stdlib and so is incompatible with `no-std`.
 //!
