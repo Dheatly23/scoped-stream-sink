@@ -31,9 +31,16 @@ struct StreamSinkInnerData<SI, RI, E> {
     recv: UnsafeCell<Option<RI>>,
     close_send: Cell<bool>,
     close_recv: Cell<bool>,
+
+    // Borrow technique from Tokio to pass pesky Miri :table-flip:
+    // <https://github.com/rust-lang/rust/pull/82834>
+    _pinned: PhantomPinned,
 }
 
-unsafe impl<SI: Sync, RI: Sync, E: Sync> Sync for StreamSinkInnerData<SI, RI, E> {}
+// SAFETY: We don't ever use immutable borrow for any of the operations, so it's automatically Sync too.
+// Similar to unstable Exclusive struct.
+unsafe impl<SI: Send, RI: Send, E: Send> Send for StreamSinkInnerData<SI, RI, E> {}
+unsafe impl<SI: Send, RI: Send, E: Send> Sync for StreamSinkInnerData<SI, RI, E> {}
 
 impl<SI, RI, E> StreamSinkInnerData<SI, RI, E> {
     const fn new() -> Self {
@@ -42,6 +49,7 @@ impl<SI, RI, E> StreamSinkInnerData<SI, RI, E> {
             recv: UnsafeCell::new(None),
             close_send: Cell::new(false),
             close_recv: Cell::new(false),
+            _pinned: PhantomPinned,
         }
     }
 }
@@ -49,10 +57,9 @@ impl<SI, RI, E> StreamSinkInnerData<SI, RI, E> {
 #[cfg(feature = "std")]
 pin_project! {
     struct StreamSinkInner<'scope, 'env: 'scope, SI, RI, E> {
+        #[pin]
         inner: LocalThread<StreamSinkInnerData<SI, RI, E>>,
 
-        #[pin]
-        pinned: PhantomPinned,
         phantom: PhantomData<&'scope mut &'env (SI, RI, E)>,
     }
 }
@@ -114,7 +121,6 @@ impl<'env, SI, RI, E> ScopedStreamSink<'env, SI, RI, E> {
         let mut data = Box::pin(StreamSinkInner {
             inner: LocalThread::new(StreamSinkInnerData::new()),
 
-            pinned: PhantomPinned,
             phantom: PhantomData,
         });
 
@@ -261,22 +267,11 @@ impl<'env, SI, RI, E> StreamSink<SI, RI> for ScopedStreamSink<'env, SI, RI, E> {
 
     fn poll_stream_sink(self: Pin<&mut Self>, cx: &mut Context<'_>) -> State<SI, Self::Error> {
         let this = self.project();
-        this.data
-            .as_mut()
-            .project()
-            .inner
-            .set_inner_ctx()
-            .stream_sink(cx, this.fut)
+        this.data.inner.set_inner_ctx().stream_sink(cx, this.fut)
     }
 
     fn start_send(self: Pin<&mut Self>, item: RI) -> Result<(), Self::Error> {
-        self.project()
-            .data
-            .as_mut()
-            .project()
-            .inner
-            .set_inner_ctx()
-            .send_outer(item);
+        self.data.inner.set_inner_ctx().send_outer(item);
         Ok(())
     }
 
@@ -285,12 +280,7 @@ impl<'env, SI, RI, E> StreamSink<SI, RI> for ScopedStreamSink<'env, SI, RI, E> {
         cx: &mut Context<'_>,
     ) -> Poll<Result<Option<SI>, Self::Error>> {
         let this = self.project();
-        this.data
-            .as_mut()
-            .project()
-            .inner
-            .set_inner_ctx()
-            .close_outer(cx, this.fut)
+        this.data.inner.set_inner_ctx().close_outer(cx, this.fut)
     }
 }
 

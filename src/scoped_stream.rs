@@ -53,15 +53,23 @@ pin_project! {
 struct StreamInnerData<T> {
     data: UnsafeCell<Option<T>>,
     closed: Cell<bool>,
+
+    // Borrow technique from Tokio to pass pesky Miri :table-flip:
+    // <https://github.com/rust-lang/rust/pull/82834>
+    _pinned: PhantomPinned,
 }
 
-unsafe impl<T: Sync> Sync for StreamInnerData<T> {}
+// SAFETY: We don't ever use immutable borrow for any of the operations, so it's automatically Sync too.
+// Similar to unstable Exclusive struct.
+unsafe impl<T: Send> Send for StreamInnerData<T> {}
+unsafe impl<T: Send> Sync for StreamInnerData<T> {}
 
 impl<T> StreamInnerData<T> {
     const fn new() -> Self {
         Self {
             data: UnsafeCell::new(None),
             closed: Cell::new(false),
+            _pinned: PhantomPinned,
         }
     }
 }
@@ -83,10 +91,9 @@ pin_project! {
     /// Also do note that some of the check depends on `debug_assertions` build config
     /// (AKA only on debug builds).
     pub struct StreamInner<'scope, 'env: 'scope, T> {
+        #[pin]
         inner: LocalThread<StreamInnerData<T>>,
 
-        #[pin]
-        pinned: PhantomPinned,
         phantom: PhantomData<&'scope mut &'env T>,
     }
 }
@@ -109,10 +116,9 @@ pin_project! {
     /// Also do note that some of the check depends on `debug_assertions` build config
     /// (AKA only on debug builds).
     pub struct TryStreamInner<'scope, 'env: 'scope, T, E> {
+        #[pin]
         inner: LocalThread<StreamInnerData<Result<T, E>>>,
 
-        #[pin]
-        pinned: PhantomPinned,
         phantom: PhantomData<&'scope mut &'env (T, E)>,
     }
 }
@@ -155,7 +161,6 @@ impl<'env, T> ScopedStream<'env, T> {
         let mut data = Box::pin(StreamInner {
             inner: LocalThread::new(StreamInnerData::new()),
 
-            pinned: PhantomPinned,
             phantom: PhantomData,
         });
 
@@ -210,7 +215,6 @@ impl<'env, T, E> ScopedTryStream<'env, T, E> {
         let mut data = Box::pin(TryStreamInner {
             inner: LocalThread::new(StreamInnerData::new()),
 
-            pinned: PhantomPinned,
             phantom: PhantomData,
         });
 
@@ -329,12 +333,7 @@ impl<'env, T, E> Stream for ScopedTryStream<'env, T, E> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
-        this.data
-            .as_mut()
-            .project()
-            .inner
-            .set_inner_ctx()
-            .next_fallible(cx, this.fut)
+        this.data.inner.set_inner_ctx().next_fallible(cx, this.fut)
     }
 }
 
@@ -347,16 +346,16 @@ impl<'scope, 'env, T> Sink<T> for StreamInner<'scope, 'env, T> {
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.into_ref().inner.get_inner().flush()
+        self.inner.get_inner().flush()
     }
 
     fn start_send(self: Pin<&mut Self>, item: T) -> Result<(), Self::Error> {
-        self.into_ref().inner.get_inner().send(item);
+        self.inner.get_inner().send(item);
         Ok(())
     }
 
     fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.into_ref().inner.get_inner().close()
+        self.inner.get_inner().close()
     }
 }
 
@@ -369,16 +368,16 @@ impl<'scope, 'env, T, E> Sink<Result<T, E>> for TryStreamInner<'scope, 'env, T, 
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
-        self.into_ref().inner.get_inner().flush()
+        self.inner.get_inner().flush()
     }
 
     fn start_send(self: Pin<&mut Self>, item: Result<T, E>) -> Result<(), Infallible> {
-        self.into_ref().inner.get_inner().send(item);
+        self.inner.get_inner().send(item);
         Ok(())
     }
 
     fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
-        self.into_ref().inner.get_inner().close()
+        self.inner.get_inner().close()
     }
 }
 
@@ -433,10 +432,9 @@ pin_project! {
     ///
     /// Similiar to [`StreamInner`], but not [`Send`].
     pub struct LocalStreamInner<'scope, 'env: 'scope, T> {
+        #[pin]
         inner: StreamInnerData<T>,
 
-        #[pin]
-        pinned: PhantomPinned,
         phantom: PhantomData<(&'scope mut &'env T, *mut u8)>,
     }
 }
@@ -446,10 +444,9 @@ pin_project! {
     ///
     /// Similiar to [`TryStreamInner`], but not [`Send`].
     pub struct LocalTryStreamInner<'scope, 'env: 'scope, T, E> {
+        #[pin]
         inner: StreamInnerData<Result<T, E>>,
 
-        #[pin]
-        pinned: PhantomPinned,
         phantom: PhantomData<(&'scope mut &'env (T, E), *mut u8)>,
     }
 }
@@ -491,7 +488,6 @@ impl<'env, T> LocalScopedStream<'env, T> {
         let mut data = Box::pin(LocalStreamInner {
             inner: StreamInnerData::new(),
 
-            pinned: PhantomPinned,
             phantom: PhantomData,
         });
 
@@ -544,7 +540,6 @@ impl<'env, T, E> LocalScopedTryStream<'env, T, E> {
         let mut data = Box::pin(LocalTryStreamInner {
             inner: StreamInnerData::new(),
 
-            pinned: PhantomPinned,
             phantom: PhantomData,
         });
 
@@ -563,7 +558,7 @@ impl<'env, T> Stream for LocalScopedStream<'env, T> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
-        this.data.as_mut().project().inner.next(cx, this.fut)
+        this.data.inner.next(cx, this.fut)
     }
 }
 
@@ -572,11 +567,7 @@ impl<'env, T, E> Stream for LocalScopedTryStream<'env, T, E> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
-        this.data
-            .as_mut()
-            .project()
-            .inner
-            .next_fallible(cx, this.fut)
+        this.data.inner.next_fallible(cx, this.fut)
     }
 }
 
@@ -588,16 +579,16 @@ impl<'scope, 'env, T> Sink<T> for LocalStreamInner<'scope, 'env, T> {
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.project().inner.flush()
+        self.inner.flush()
     }
 
     fn start_send(self: Pin<&mut Self>, item: T) -> Result<(), Self::Error> {
-        self.project().inner.send(item);
+        self.inner.send(item);
         Ok(())
     }
 
     fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.project().inner.close()
+        self.inner.close()
     }
 }
 
@@ -609,16 +600,16 @@ impl<'scope, 'env, T, E> Sink<Result<T, E>> for LocalTryStreamInner<'scope, 'env
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
-        self.project().inner.flush()
+        self.inner.flush()
     }
 
     fn start_send(self: Pin<&mut Self>, item: Result<T, E>) -> Result<(), Infallible> {
-        self.project().inner.send(item);
+        self.inner.send(item);
         Ok(())
     }
 
     fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
-        self.project().inner.close()
+        self.inner.close()
     }
 }
 

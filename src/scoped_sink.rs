@@ -2,7 +2,9 @@ use alloc::boxed::Box;
 use core::cell::{Cell, UnsafeCell};
 use core::future::Future;
 use core::marker::{PhantomData, PhantomPinned};
-use core::ops::{Deref, DerefMut};
+#[cfg(feature = "std")]
+use core::ops::Deref;
+use core::ops::DerefMut;
 use core::pin::Pin;
 use core::ptr::NonNull;
 use core::task::{Context, Poll};
@@ -60,15 +62,23 @@ pin_project! {
 struct SinkInnerData<T> {
     data: UnsafeCell<Option<T>>,
     closed: Cell<bool>,
+
+    // Borrow technique from Tokio to pass pesky Miri :table-flip:
+    // <https://github.com/rust-lang/rust/pull/82834>
+    _pinned: PhantomPinned,
 }
 
-unsafe impl<T: Sync> Sync for SinkInnerData<T> {}
+// SAFETY: We don't ever use immutable borrow for any of the operations, so it's automatically Sync too.
+// Similar to unstable Exclusive struct.
+unsafe impl<T: Send> Send for SinkInnerData<T> {}
+unsafe impl<T: Send> Sync for SinkInnerData<T> {}
 
 impl<T> SinkInnerData<T> {
     const fn new() -> Self {
         Self {
             data: UnsafeCell::new(None),
             closed: Cell::new(false),
+            _pinned: PhantomPinned,
         }
     }
 }
@@ -92,10 +102,9 @@ pin_project! {
     /// Also do note that some of the check depends on `debug_assertions` build config
     /// (AKA only on debug builds).
     pub struct SinkInner<'scope, 'env: 'scope, T> {
+        #[pin]
         inner: LocalThread<SinkInnerData<T>>,
 
-        #[pin]
-        pinned: PhantomPinned,
         phantom: PhantomData<&'scope mut &'env T>,
     }
 }
@@ -120,7 +129,6 @@ impl<'env, T: 'env, E: 'env> ScopedSink<'env, T, E> {
             data: Box::pin(SinkInner {
                 inner: LocalThread::new(SinkInnerData::new()),
 
-                pinned: PhantomPinned,
                 phantom: PhantomData,
             }),
 
@@ -301,7 +309,7 @@ impl<'env, T: 'env, E: 'env> ScopedSink<'env, T, E> {
         };
 
         (
-            this.data.as_mut().project().inner.set_inner_ctx(),
+            this.data.as_ref().get_ref().inner.set_inner_ctx(),
             this.inner,
             f,
         )
@@ -323,13 +331,7 @@ impl<'env, T: 'env, E: 'env> Sink<T> for ScopedSink<'env, T, E> {
     }
 
     fn start_send(self: Pin<&mut Self>, item: T) -> Result<(), E> {
-        self.project()
-            .data
-            .as_mut()
-            .project()
-            .inner
-            .set_inner_ctx()
-            .send(item);
+        self.data.inner.set_inner_ctx().send(item);
         Ok(())
     }
 
@@ -345,7 +347,7 @@ impl<'scope, 'env, T> Stream for SinkInner<'scope, 'env, T> {
     type Item = T;
 
     fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.into_ref().inner.get_inner().next()
+        self.inner.get_inner().next()
     }
 }
 
@@ -392,10 +394,9 @@ pin_project! {
     ///
     /// Similiar to [`SinkInner`], but not [`Send`].
     pub struct LocalSinkInner<'scope, 'env: 'scope, T> {
+        #[pin]
         inner: SinkInnerData<T>,
 
-        #[pin]
-        pinned: PhantomPinned,
         phantom: PhantomData<(&'scope mut &'env T, *mut u8)>,
     }
 }
@@ -419,7 +420,6 @@ impl<'env, T: 'env, E: 'env> LocalScopedSink<'env, T, E> {
             data: Box::pin(LocalSinkInner {
                 inner: SinkInnerData::new(),
 
-                pinned: PhantomPinned,
                 phantom: PhantomData,
             }),
 
@@ -502,7 +502,7 @@ impl<'env, T: 'env, E: 'env> Sink<T> for LocalScopedSink<'env, T, E> {
     }
 
     fn start_send(self: Pin<&mut Self>, item: T) -> Result<(), E> {
-        self.project().data.as_mut().project().inner.send(item);
+        self.data.inner.send(item);
         Ok(())
     }
 
@@ -517,7 +517,7 @@ impl<'scope, 'env, T> Stream for LocalSinkInner<'scope, 'env, T> {
     type Item = T;
 
     fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.project().inner.next()
+        self.inner.next()
     }
 }
 
