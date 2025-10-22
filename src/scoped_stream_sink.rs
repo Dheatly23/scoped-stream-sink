@@ -1,4 +1,5 @@
 use alloc::boxed::Box;
+use core::cell::{Cell, UnsafeCell};
 use core::convert::Infallible;
 use core::future::Future;
 use core::marker::{PhantomData, PhantomPinned};
@@ -18,6 +19,7 @@ use crate::{State, StreamSink};
 #[cfg(feature = "std")]
 pin_project! {
     /// Scoped version of [`StreamSink`]. Makes building [`StreamSink`] much easier to do.
+    #[must_use = "StreamSink will not do anything if not used"]
     pub struct ScopedStreamSink<'env, SI, RI, E> {
         fut: Option<Pin<Box<dyn Future<Output = Result<(), E>> + Send + 'env>>>,
 
@@ -26,19 +28,39 @@ pin_project! {
 }
 
 struct StreamSinkInnerData<SI, RI, E> {
-    send: Option<Result<SI, E>>,
-    recv: Option<RI>,
-    close_send: bool,
-    close_recv: bool,
+    send: UnsafeCell<Option<Result<SI, E>>>,
+    recv: UnsafeCell<Option<RI>>,
+    close_send: Cell<bool>,
+    close_recv: Cell<bool>,
+
+    // Borrow technique from Tokio to pass pesky Miri :table-flip:
+    // <https://github.com/rust-lang/rust/pull/82834>
+    _pinned: PhantomPinned,
+}
+
+// SAFETY: We don't ever use immutable borrow for any of the operations, so it's automatically Sync too.
+// Similar to unstable Exclusive struct.
+unsafe impl<SI: Send, RI: Send, E: Send> Send for StreamSinkInnerData<SI, RI, E> {}
+unsafe impl<SI: Send, RI: Send, E: Send> Sync for StreamSinkInnerData<SI, RI, E> {}
+
+impl<SI, RI, E> StreamSinkInnerData<SI, RI, E> {
+    const fn new() -> Self {
+        StreamSinkInnerData {
+            send: UnsafeCell::new(None),
+            recv: UnsafeCell::new(None),
+            close_send: Cell::new(false),
+            close_recv: Cell::new(false),
+            _pinned: PhantomPinned,
+        }
+    }
 }
 
 #[cfg(feature = "std")]
 pin_project! {
     struct StreamSinkInner<'scope, 'env: 'scope, SI, RI, E> {
+        #[pin]
         inner: LocalThread<StreamSinkInnerData<SI, RI, E>>,
 
-        #[pin]
-        pinned: PhantomPinned,
         phantom: PhantomData<&'scope mut &'env (SI, RI, E)>,
     }
 }
@@ -59,6 +81,7 @@ pin_project! {
     ///
     /// Also do note that some of the check depends on `debug_assertions` build config
     /// (AKA only on debug builds).
+    #[must_use = "Stream will not do anything if not used"]
     pub struct StreamPart<'scope, 'env: 'scope, SI, RI, E> {
         ptr: Pin<&'scope mut StreamSinkInner<'scope, 'env, SI, RI, E>>,
     }
@@ -80,6 +103,7 @@ pin_project! {
     ///
     /// Also do note that some of the check depends on `debug_assertions` build config
     /// (AKA only on debug builds).
+    #[must_use = "Sink will not do anything if not used"]
     pub struct SinkPart<'scope, 'env: 'scope, SI, RI, E> {
         ptr: Pin<&'scope mut StreamSinkInner<'scope, 'env, SI, RI, E>>,
     }
@@ -98,14 +122,8 @@ impl<'env, SI, RI, E> ScopedStreamSink<'env, SI, RI, E> {
             -> Pin<Box<dyn Future<Output = Result<(), E>> + Send + 'scope>>,
     {
         let mut data = Box::pin(StreamSinkInner {
-            inner: LocalThread::new(StreamSinkInnerData {
-                send: None,
-                recv: None,
-                close_send: false,
-                close_recv: false,
-            }),
+            inner: LocalThread::new(StreamSinkInnerData::new()),
 
-            pinned: PhantomPinned,
             phantom: PhantomData,
         });
 
@@ -130,7 +148,7 @@ impl<'env, SI, RI, E> ScopedStreamSink<'env, SI, RI, E> {
 }
 
 impl<SI, RI, E> StreamSinkInnerData<SI, RI, E> {
-    fn stream_sink<F>(&mut self, cx: &mut Context<'_>, fut: &mut Option<Pin<F>>) -> State<SI, E>
+    fn stream_sink<F>(&self, cx: &mut Context<'_>, fut: &mut Option<Pin<F>>) -> State<SI, E>
     where
         F: DerefMut,
         F::Target: Future<Output = Result<(), E>>,
@@ -142,15 +160,20 @@ impl<SI, RI, E> StreamSinkInnerData<SI, RI, E> {
 
         if let Poll::Ready(v) = ret {
             *fut = None;
-            self.close_send = true;
-            self.close_recv = true;
+            self.close_send.set(true);
+            self.close_recv.set(true);
 
             if let Err(e) = v {
                 return State::Error(e);
             }
         }
 
-        match (self.send.take(), !self.close_recv && self.recv.is_none()) {
+        match unsafe {
+            (
+                (*self.send.get()).take(),
+                !self.close_recv.get() && (*self.recv.get()).is_none(),
+            )
+        } {
             (Some(Err(e)), _) => State::Error(e),
             (Some(Ok(i)), true) => State::SendRecvReady(i),
             (Some(Ok(i)), false) => State::SendReady(i),
@@ -160,19 +183,20 @@ impl<SI, RI, E> StreamSinkInnerData<SI, RI, E> {
         }
     }
 
-    fn send_outer(&mut self, item: RI) {
-        if self.close_recv {
+    fn send_outer(&self, item: RI) {
+        if self.close_recv.get() {
             panic!("ScopedStreamSink is closed!");
         }
-        if self.recv.is_some() {
+        let recv = unsafe { &mut *self.recv.get() };
+        if recv.is_some() {
             panic!("ScopedStreamSink is not ready to receive!");
         }
 
-        self.recv = Some(item);
+        *recv = Some(item);
     }
 
     fn close_outer<F>(
-        &mut self,
+        &self,
         cx: &mut Context<'_>,
         fut: &mut Option<Pin<F>>,
     ) -> Poll<Result<Option<SI>, E>>
@@ -180,7 +204,7 @@ impl<SI, RI, E> StreamSinkInnerData<SI, RI, E> {
         F: DerefMut,
         F::Target: Future<Output = Result<(), E>>,
     {
-        self.close_recv = true;
+        self.close_recv.set(true);
         let ret = match fut {
             Some(f) => f.as_mut().poll(cx),
             None => Poll::Ready(Ok(())),
@@ -194,7 +218,7 @@ impl<SI, RI, E> StreamSinkInnerData<SI, RI, E> {
             }
         }
 
-        let ret = self.send.take();
+        let ret = unsafe { (*self.send.get()).take() };
         if ret.is_none() && fut.is_some() {
             Poll::Pending
         } else {
@@ -202,36 +226,37 @@ impl<SI, RI, E> StreamSinkInnerData<SI, RI, E> {
         }
     }
 
-    fn next(&mut self) -> Poll<Option<RI>> {
-        match self.recv.take() {
+    fn next(&self) -> Poll<Option<RI>> {
+        match unsafe { (*self.recv.get()).take() } {
             v @ Some(_) => Poll::Ready(v),
-            None if self.close_recv => Poll::Ready(None),
+            None if self.close_recv.get() => Poll::Ready(None),
             None => Poll::Pending,
         }
     }
 
-    fn flush<E2>(&mut self) -> Poll<Result<(), E2>> {
-        if !self.close_send && self.send.is_none() {
+    fn flush<E2>(&self) -> Poll<Result<(), E2>> {
+        if !self.close_send.get() && unsafe { (*self.send.get()).is_none() } {
             Poll::Ready(Ok(()))
         } else {
             Poll::Pending
         }
     }
 
-    fn send_inner(&mut self, item: Result<SI, E>) {
-        if self.close_send {
+    fn send_inner(&self, item: Result<SI, E>) {
+        if self.close_send.get() {
             panic!("ScopedStreamSink is closed!");
         }
-        if self.send.is_some() {
+        let send = unsafe { &mut *self.send.get() };
+        if send.is_some() {
             panic!("poll_ready() is not called first!");
         }
 
-        self.send = Some(item);
+        *send = Some(item);
     }
 
-    fn close_inner<E2>(&mut self) -> Poll<Result<(), E2>> {
-        self.close_send = true;
-        if self.send.is_none() {
+    fn close_inner<E2>(&self) -> Poll<Result<(), E2>> {
+        self.close_send.set(true);
+        if unsafe { (*self.send.get()).is_none() } {
             Poll::Ready(Ok(()))
         } else {
             Poll::Pending
@@ -245,22 +270,11 @@ impl<'env, SI, RI, E> StreamSink<SI, RI> for ScopedStreamSink<'env, SI, RI, E> {
 
     fn poll_stream_sink(self: Pin<&mut Self>, cx: &mut Context<'_>) -> State<SI, Self::Error> {
         let this = self.project();
-        this.data
-            .as_mut()
-            .project()
-            .inner
-            .set_inner_ctx()
-            .stream_sink(cx, this.fut)
+        this.data.inner.set_inner_ctx().stream_sink(cx, this.fut)
     }
 
     fn start_send(self: Pin<&mut Self>, item: RI) -> Result<(), Self::Error> {
-        self.project()
-            .data
-            .as_mut()
-            .project()
-            .inner
-            .set_inner_ctx()
-            .send_outer(item);
+        self.data.inner.set_inner_ctx().send_outer(item);
         Ok(())
     }
 
@@ -269,12 +283,7 @@ impl<'env, SI, RI, E> StreamSink<SI, RI> for ScopedStreamSink<'env, SI, RI, E> {
         cx: &mut Context<'_>,
     ) -> Poll<Result<Option<SI>, Self::Error>> {
         let this = self.project();
-        this.data
-            .as_mut()
-            .project()
-            .inner
-            .set_inner_ctx()
-            .close_outer(cx, this.fut)
+        this.data.inner.set_inner_ctx().close_outer(cx, this.fut)
     }
 }
 
@@ -332,6 +341,7 @@ impl<'scope, 'env, SI, RI, E> Sink<SI> for SinkPart<'scope, 'env, SI, RI, E> {
 
 pin_project! {
     /// Locally scoped version of [`StreamSink`]. Does not implement [`Send`].
+    #[must_use = "StreamSink will not do anything if not used"]
     pub struct LocalScopedStreamSink<'env, SI, RI, E> {
         fut: Option<Pin<Box<dyn Future<Output = Result<(), E>> + 'env>>>,
 
@@ -353,6 +363,7 @@ pin_project! {
     /// [`Stream`] half of inner [`LocalScopedStreamSink`].
     /// Produce receive type values.
     /// Can only be closed from it's outer [`LocalScopedStreamSink`].
+    #[must_use = "Stream will not do anything if not used"]
     pub struct LocalStreamPart<'scope, 'env: 'scope, SI, RI, E> {
         ptr: Pin<&'scope mut LocalStreamSinkInner<'scope, 'env, SI, RI, E>>,
     }
@@ -362,6 +373,7 @@ pin_project! {
     /// [`Sink`] half of inner [`LocalScopedStreamSink`].
     /// Can receive both send type or a [`Result`] type.
     /// Closing will complete when outer [`LocalScopedStreamSink`] is closed and received all data.
+    #[must_use = "Sink will not do anything if not used"]
     pub struct LocalSinkPart<'scope, 'env: 'scope, SI, RI, E> {
         ptr: Pin<&'scope mut LocalStreamSinkInner<'scope, 'env, SI, RI, E>>,
     }
@@ -378,12 +390,7 @@ impl<'env, SI, RI, E> LocalScopedStreamSink<'env, SI, RI, E> {
         ) -> Pin<Box<dyn Future<Output = Result<(), E>> + 'scope>>,
     {
         let mut data = Box::pin(LocalStreamSinkInner {
-            inner: StreamSinkInnerData {
-                send: None,
-                recv: None,
-                close_send: false,
-                close_recv: false,
-            },
+            inner: StreamSinkInnerData::new(),
 
             pinned: PhantomPinned,
             phantom: PhantomData,

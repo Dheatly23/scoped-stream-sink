@@ -16,6 +16,7 @@ use pin_project_lite::pin_project;
 ///
 /// Implements many useful [`From`] traits to ease conversion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[must_use = "StreamSink state error state needs to be handled"]
 pub enum State<T, E> {
     /// Is pending.
     Pending,
